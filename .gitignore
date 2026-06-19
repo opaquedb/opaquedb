@@ -1,0 +1,16 @@
+# Build trees (generated proto code lives here and is never committed).
+/build/
+/out/
+
+# vcpkg local state.
+/vcpkg_installed/
+
+# User-specific preset overrides (e.g. relocating the build dir off a fuseblk
+# workspace mount in the dev container). Never committed.
+/CMakeUserPresets.json
+
+# Editor and OS noise.
+*.swp
+.DS_Store
+compile_commands.json
+/.vcpkg-bt/
