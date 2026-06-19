@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "opaquedb",
+  "version": "0.1.0",
+  "description": "Distributed PIR database engine answering SQL-like queries over homomorphically encrypted data.",
+  "license": "Apache-2.0",
+  "builtin-baseline": "930ecc42b512b564571d767f70775d284a6fa307",
+  "dependencies": [
+    "abseil",
+    "cli11",
+    "replxx",
+    "spdlog",
+    "tomlplusplus",
+    "nlohmann-json",
+    "seal",
+    "grpc",
+    "protobuf",
+    {
+      "name": "etcd-cpp-apiv3",
+      "default-features": false
+    },
+    "gtest"
+  ]
+}
