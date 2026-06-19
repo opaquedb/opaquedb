@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref so the queue stays short.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    env:
+      VCPKG_ROOT: /opt/vcpkg
+      # Cache vcpkg build artifacts between runs.
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf autoconf-archive automake bison build-essential \
+            clang clang-format clang-tidy cmake curl flex git libtool \
+            libtool-bin m4 nasm ninja-build perl pkg-config python3 \
+            tar unzip zip zlib1g-dev
+
+      - name: Bootstrap vcpkg
+        run: |
+          sudo git clone https://github.com/microsoft/vcpkg "$VCPKG_ROOT"
+          sudo git -C "$VCPKG_ROOT" checkout \
+            930ecc42b512b564571d767f70775d284a6fa307
+          sudo "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+          sudo chown -R "$USER" "$VCPKG_ROOT"
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+
+      - name: Cache vcpkg artifacts
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      - name: clang-format check
+        run: |
+          find src tests -type f \( -name '*.cpp' -o -name '*.h' \) \
+            -print0 | xargs -0 clang-format --dry-run --Werror
+
+      - name: Configure
+        run: cmake --preset dev
+
+      - name: Build
+        run: cmake --build --preset dev
+
+      - name: Test
+        run: ctest --preset dev
+
+      - name: clang-tidy
+        run: |
+          find src -type f -name '*.cpp' -print0 \
+            | xargs -0 clang-tidy -p build/dev

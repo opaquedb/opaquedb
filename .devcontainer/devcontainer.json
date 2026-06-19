@@ -1,0 +1,26 @@
+{
+  "name": "OpaqueDB",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-vscode.cmake-tools",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+      }
+    }
+  },
+  "remoteUser": "root",
+  "postCreateCommand": "claude --version || true"
+}
