@@ -1,0 +1,14 @@
+// Generated from config/opaquedb.default.toml by CMake. Do not edit.
+// The canonical default config is embedded here as a string so there is no
+// runtime path dependency and no second copy of the defaults.
+#ifndef OPAQUEDB_CONFIG_DEFAULT_CONFIG_DATA_H_
+#define OPAQUEDB_CONFIG_DEFAULT_CONFIG_DATA_H_
+
+namespace opaquedb::config {
+
+inline constexpr char kDefaultConfigTomlData[] =
+    R"OPAQUEDBTOML(@OPAQUEDB_DEFAULT_CONFIG_TOML@)OPAQUEDBTOML";
+
+} // namespace opaquedb::config
+
+#endif // OPAQUEDB_CONFIG_DEFAULT_CONFIG_DATA_H_
