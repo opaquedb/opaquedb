@@ -1,0 +1,80 @@
+# OpaqueDB node configuration.
+#
+# This file is the single source of truth for the built-in defaults. `config
+# init` writes it verbatim, the packaging example is generated from it, and a
+# test asserts it parses back to the compiled-in Config defaults.
+#
+# Resolution order, later overrides earlier: built-in defaults, this file,
+# environment variables (OPAQUEDB_<SECTION>_<KEY>), then command-line flags.
+# Every setting below is configurable through all four layers.
+
+[node]
+id = ""                              # empty means generate a stable random id
+data_dir = "/var/lib/opaquedb"
+
+[cluster]
+enabled = false                      # true to join an etcd cluster
+etcd_endpoints = ["http://127.0.0.1:2379"]
+leader_key = "/opaquedb/leader"
+# Authentication from this node to etcd, separate from client auth and the
+# node-to-node mTLS below. Set etcd_username for password auth. Set etcd_ca_cert
+# to connect to etcd over TLS; add etcd_client_cert/etcd_client_key for mutual
+# TLS, and etcd_tls_name to override the certificate host name when dialing by
+# IP. TLS takes precedence if both password and TLS settings are present.
+etcd_username = ""                   # username for etcd password auth
+etcd_password = ""                   # password for etcd password auth
+etcd_ca_cert = ""                    # CA that signs the etcd server certificate
+etcd_client_cert = ""                # client certificate for mutual TLS to etcd
+etcd_client_key = ""                 # client private key for mutual TLS to etcd
+etcd_tls_name = ""                   # certificate host name override (TLS by IP)
+# Node-to-node (Internal RPC) mTLS, a separate trust domain from client auth.
+# A clustered node (enabled = true) must set these (or server TLS) or it refuses
+# to start; allow_insecure permits unencrypted node-to-node traffic for local
+# development only.
+tls_cert = ""                        # this node's cluster certificate
+tls_key = ""                         # this node's cluster private key
+ca_cert = ""                         # CA that signs peer cluster certificates
+allow_insecure = false               # true to allow insecure node-to-node RPC
+
+[server]
+listen = "0.0.0.0:50051"
+advertise = ""                       # address peers use; required for clustering
+max_message_bytes = 67108864         # large enough for evaluation key streams
+tls_cert = ""                        # required when auth.mode = mtls
+tls_key = ""
+
+[crypto]                             # single source of truth for FHE params
+# The matcher is bit-sliced equality over SIMD slots: the key is binary-expanded
+# into key_bits slots per record, equality is (q-k)^2 then 1-x per bit, AND-
+# reduced across the bits by rotate-and-multiply, then a plaintext-masked
+# retrieve. Multiplicative depth is 1 + log2(key_bits); at key_bits = 16 that is
+# depth 5. poly_modulus_degree 16384 is required: the depth exhausts the noise
+# budget at degree 8192. The 349-bit coeff modulus below leaves a ~52-bit budget
+# after the full pipeline (measured). Raise key_bits for a larger key universe
+# (2^key_bits); if you do, add coeff modulus primes or the budget runs out.
+poly_modulus_degree = 16384          # power of two
+plain_modulus_bits = 20
+coeff_modulus_bits = [60, 60, 60, 60, 60, 49]
+key_bits = 16                        # key universe 2^key_bits; eq depth 1+log2
+
+[storage]
+record_bytes = 128                   # fixed payload record size; sets plane count
+epoch_dir = ""                       # empty means data_dir/epochs
+
+[auth]
+mode = "token"                       # token | mtls | none
+enable_insecure = false              # must be true to allow mode = none
+token_file = "/etc/opaquedb/tokens"
+ca_cert = ""                         # client CA for mtls
+
+[blobstore]
+kind = "local"                       # local | s3
+path = "/var/lib/opaquedb/keys"
+
+[metrics]
+listen = "0.0.0.0:9090"
+
+[logging]
+level = "info"
+format = "json"                      # json | text
+file = ""                            # empty means standard output
