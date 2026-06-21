@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+// The client query API. Any node can serve this; a client connects to any node
+// and that node coordinates the query. The .proto files are the single source of
+// truth for the wire format.
+package opaquedb.proto;
+
+service OpaqueDB {
+  // Uploads a client's public and evaluation keys. Streamed because the Galois
+  // key set (required by the bit-sliced matcher) is large.
+  rpc Register(stream RegisterChunk) returns (RegisterReply);
+
+  // Runs one private query and returns the encrypted result list.
+  rpc Execute(QueryRequest) returns (QueryReply);
+
+  // Appends one row to a table and publishes a new immutable epoch. The row is
+  // plaintext today; a future encrypted-payload insert rides the same RPC with
+  // the client encoding/encrypting the values before sending.
+  rpc Insert(InsertRequest) returns (InsertReply);
+
+  // Returns the schema of a table's current epoch, so a client can decode rows
+  // and apply its SELECT projection. The schema is public template metadata, not
+  // secret data.
+  rpc DescribeTable(DescribeRequest) returns (DescribeReply);
+}
+
+// Which key a RegisterChunk carries a piece of.
+enum KeyKind {
+  KEY_KIND_UNSPECIFIED = 0;
+  PUBLIC_KEY = 1;
+  RELIN_KEYS = 2;
+  GALOIS_KEYS = 3;
+}
+
+// One chunk of one key. The server concatenates chunks of the same kind in
+// arrival order, then assembles the keyring when the stream ends.
+message RegisterChunk {
+  uint32 wire_version = 1;
+  string client_id = 2;
+  KeyKind kind = 3;
+  bytes data = 4;
+}
+
+message RegisterReply {
+  string client_id = 1;
+}
+
+message QueryRequest {
+  uint32 wire_version = 1;
+  string client_id = 2;
+  // The public SQL template. The value is bound, never inlined.
+  string sql_template = 3;
+  // The encrypted WHERE value: a serialized one-element ciphertext list holding
+  // the value binary-expanded and tiled across the BatchEncoder slots.
+  bytes encrypted_param = 4;
+  // Optional backend name. Empty lets the planner choose by capability.
+  string backend = 5;
+  // The database holding the table named in the SQL FROM clause. Empty means
+  // the "default" database. The table itself comes from the SQL.
+  string database = 6;
+}
+
+// A list of matched records. Each entry is one record: a serialized list of the
+// payload-plane ciphertexts the matcher returned, which the client decrypts and
+// concatenates. A list of records so multi-item return (batch PIR) stays a
+// non-breaking change.
+message QueryReply {
+  repeated bytes encrypted_result = 1;
+}
+
+message InsertRequest {
+  uint32 wire_version = 1;
+  // The database holding the table. Empty means the "default" database.
+  string database = 2;
+  string table = 3;
+  // One value per column, as text, in the table's declared (CREATE TABLE) column
+  // order, including the match key column. The server reads the table's schema
+  // from its current epoch and parses each value by its column type. A future
+  // encrypted-payload insert sends the same message shape; only how the values
+  // are produced on the client changes.
+  repeated string values = 4;
+}
+
+message InsertReply {
+  // The new epoch version the row landed in.
+  uint64 epoch_version = 1;
+  // Total row count in the table after the insert.
+  uint64 row_count = 2;
+}
+
+message DescribeRequest {
+  uint32 wire_version = 1;
+  string database = 2; // empty means "default"
+  string table = 3;
+}
+
+// One column's public shape. Spellings match core::ToString for type/encoding.
+message TableColumn {
+  string name = 1;
+  string type = 2;     // int | real | text
+  string encoding = 3; // eq | prefix | range | raw
+}
+
+message DescribeReply {
+  string table = 1;
+  repeated TableColumn columns = 2;
+}

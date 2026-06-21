@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+// Node-to-node API. A coordinating node fans the encrypted query out to the
+// shard nodes through Evaluate; each shard runs the backend over its segment at
+// the pinned epoch and returns encrypted partials. The coordinator combines the
+// partials under encryption. This service is reached over mutual TLS with
+// cluster certificates, separate from client authentication.
+package opaquedb.proto;
+
+import "opaquedb.proto"; // for KeyKind
+
+service Internal {
+  rpc Evaluate(ShardQuery) returns (ShardPartial);
+  // The coordinating node forwards a client's keys to every shard so each can
+  // evaluate. Streamed because the Galois key set is large (hundreds of MB);
+  // the shard concatenates chunks of the same kind. A BlobStore-backed keyring
+  // is the documented production path for distributing keys without re-sending.
+  rpc RegisterKeys(stream KeyUploadChunk) returns (KeyUploadReply);
+}
+
+// One chunk of one forwarded key, mirroring the public RegisterChunk.
+message KeyUploadChunk {
+  uint32 wire_version = 1;
+  string client_id = 2;
+  KeyKind kind = 3;
+  bytes data = 4;
+}
+
+message KeyUploadReply {
+  string client_id = 1;
+}
+
+message ShardQuery {
+  uint32 wire_version = 1;
+  string client_id = 2;
+  string sql_template = 3;
+  bytes encrypted_param = 4;
+  string backend = 5;
+  // The global epoch every shard must answer from, so one query sees one
+  // consistent snapshot across the cluster.
+  uint64 epoch_version = 6;
+  // The database holding the queried table. Empty means "default".
+  string database = 7;
+}
+
+message ShardPartial {
+  // One serialized partial ciphertext per payload plane. The coordinator sums
+  // these plane-wise across shards. A list so batch PIR stays non-breaking.
+  repeated bytes partials = 1;
+}

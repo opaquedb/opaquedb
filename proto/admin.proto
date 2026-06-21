@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+// The management API, separate from the query API. The CLI is a client now; an
+// HTTP/JSON gateway for a web UI can be added later with no change to the
+// AdminService logic. Admin operations require a principal with the Admin role.
+package opaquedb.proto;
+
+service Admin {
+  rpc Status(StatusRequest) returns (StatusReply);
+  rpc InspectSchema(SchemaRequest) returns (SchemaReply);
+  rpc ListEpochs(ListEpochsRequest) returns (ListEpochsReply);
+  rpc RollbackEpoch(RollbackRequest) returns (RollbackReply);
+  rpc Load(stream LoadChunk) returns (LoadReply);
+  rpc ListPrincipals(PrincipalsRequest) returns (PrincipalsReply);
+}
+
+message StatusRequest {
+  uint32 wire_version = 1;
+}
+
+message StatusReply {
+  string node_id = 1;
+  string role = 2;
+  bool has_epoch = 3;
+  uint64 epoch_version = 4;
+  uint64 row_count = 5;
+  repeated string backends = 6;
+  string auth_mode = 7;
+}
+
+message SchemaRequest {
+  uint32 wire_version = 1;
+}
+
+message ColumnInfo {
+  string name = 1;
+  string encoding = 2;
+}
+
+message SchemaReply {
+  string table = 1;
+  repeated ColumnInfo columns = 2;
+}
+
+message ListEpochsRequest {
+  uint32 wire_version = 1;
+}
+
+message ListEpochsReply {
+  repeated uint64 versions = 1;
+  bool has_current = 2;
+  uint64 current = 3;
+}
+
+message RollbackRequest {
+  uint32 wire_version = 1;
+  uint64 version = 2;
+}
+
+message RollbackReply {
+  uint64 current = 1;
+}
+
+// One chunk of a load. The table and column names are carried on every chunk and
+// must agree; the key and value carry one row.
+message LoadChunk {
+  uint32 wire_version = 1;
+  string table = 2;
+  string key_column = 3;
+  string value_column = 4;
+  uint64 key = 5;
+  bytes value = 6;
+}
+
+message LoadReply {
+  uint64 epoch_version = 1;
+  uint64 rows = 2;
+}
+
+message PrincipalsRequest {
+  uint32 wire_version = 1;
+}
+
+message PrincipalsReply {
+  repeated string client_ids = 1;
+}
