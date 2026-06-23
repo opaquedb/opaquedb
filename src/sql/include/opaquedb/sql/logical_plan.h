@@ -1,0 +1,56 @@
+#ifndef OPAQUEDB_SQL_LOGICAL_PLAN_H_
+#define OPAQUEDB_SQL_LOGICAL_PLAN_H_
+
+#include <string>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "opaquedb/sql/ast.h"
+
+// The logical plan is the resolved, executable shape of a statement: the table,
+// the columns to project, and the single equality predicate the engine runs. It
+// is built from the AST by a visitor. Statements that parse but are not yet
+// executable (range, IN, LIKE, BETWEEN, AND, OR, multiple predicates) yield a
+// clear UNIMPLEMENTED status here, not a parse error, so the grammar and AST
+// are already in place for them.
+//
+// This plan is still schema-agnostic. Resolving column encodings and choosing a
+// backend by capability is the planner's job (the next layer up).
+
+namespace opaquedb::sql {
+
+struct LogicalPlan {
+  std::string table;
+  std::vector<std::string> projection;
+  bool select_all = false; // SELECT *; the planner expands against the schema
+  std::string match_column;
+  CompareOp op = CompareOp::kEq;
+  std::string parameter; // the bound parameter name for the match value
+};
+
+// Assembles a LogicalPlan field by field and validates it on Build. Used by the
+// AST-to-plan conversion so plan construction has one place that enforces the
+// invariants (non-empty table, at least one projected column, a bound match).
+class LogicalPlanBuilder {
+public:
+  LogicalPlanBuilder &SetTable(std::string table);
+  LogicalPlanBuilder &AddProjection(std::string column);
+  LogicalPlanBuilder &SetSelectAll();
+  LogicalPlanBuilder &SetMatch(std::string column, CompareOp op,
+                               std::string parameter);
+
+  absl::StatusOr<LogicalPlan> Build() const;
+
+private:
+  LogicalPlan plan_;
+  bool match_set_ = false;
+};
+
+// Converts a parsed statement into a logical plan, or returns UNIMPLEMENTED for
+// a statement whose shape is parsed but not yet executable.
+absl::StatusOr<LogicalPlan> BuildLogicalPlan(const SelectStatement &statement);
+
+} // namespace opaquedb::sql
+
+#endif // OPAQUEDB_SQL_LOGICAL_PLAN_H_
