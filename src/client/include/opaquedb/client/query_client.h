@@ -59,10 +59,10 @@ public:
 
   // Append one row to a table. values are the column values as text in the
   // table's declared (CREATE TABLE) column order, including the match key. The
-  // table must already exist. This is a plaintext insert; the values travel over
-  // the (optionally TLS) channel but are stored in the clear, matching how data
-  // is stored at rest today. A future encrypted-payload insert encodes/encrypts
-  // the values on the client and uses this same call.
+  // table must already exist. This is a plaintext insert; the values travel
+  // over the (optionally TLS) channel but are stored in the clear, matching how
+  // data is stored at rest today. A future encrypted-payload insert
+  // encodes/encrypts the values on the client and uses this same call.
   absl::StatusOr<InsertResult> Insert(const std::string &database,
                                       const std::string &table,
                                       const std::vector<std::string> &values);

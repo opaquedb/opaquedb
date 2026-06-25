@@ -9,9 +9,9 @@
 namespace opaquedb::cli {
 
 // `insert`: append one row to an existing table over the wire. The values are
-// given in the table's declared (CREATE TABLE) column order, including the match
-// key. The row is plaintext today; a future encrypted-payload insert sends
-// client-encrypted values over the same path.
+// given in the table's declared (CREATE TABLE) column order, including the
+// match key. The row is plaintext today; a future encrypted-payload insert
+// sends client-encrypted values over the same path.
 class InsertCommand : public Command {
 public:
   void Register(CLI::App &parent, const GlobalOptions &globals,

@@ -173,8 +173,8 @@ BuildStagingFromCsv(const config::Config &config, const core::Schema &schema,
 absl::StatusOr<InsertResult>
 InsertRowAndPublish(storage::EpochRepository &repo,
                     const std::vector<std::string> &cells) {
-  // The table must already exist; we reuse its current schema and geometry so an
-  // insert never changes the layout. A fresh table is created by load.
+  // The table must already exist; we reuse its current schema and geometry so
+  // an insert never changes the layout. A fresh table is created by load.
   absl::StatusOr<std::unique_ptr<storage::EpochReader>> reader =
       repo.OpenCurrent();
   if (!reader.ok())

@@ -58,11 +58,12 @@ struct InsertResult {
 // epoch. cells are the column values as text in the schema's declared column
 // order (every column, including the match key). The new epoch reuses the
 // current one's schema, key_bits, and geometry so the layout stays consistent.
-// The table must already exist (have a current epoch); load it first. Epochs are
-// immutable, so this rewrites the existing rows plus the new one into a new
+// The table must already exist (have a current epoch); load it first. Epochs
+// are immutable, so this rewrites the existing rows plus the new one into a new
 // version. This is the one append path; the gRPC Insert RPC calls it.
-absl::StatusOr<InsertResult> InsertRowAndPublish(
-    storage::EpochRepository &repo, const std::vector<std::string> &cells);
+absl::StatusOr<InsertResult>
+InsertRowAndPublish(storage::EpochRepository &repo,
+                    const std::vector<std::string> &cells);
 
 } // namespace opaquedb::server
 

@@ -79,9 +79,9 @@ public:
   // column, including the match key). database empty means "default"; the table
   // must already exist. Plaintext insert today; a future encrypted-payload
   // insert sends pre-encoded values over the same path.
-  absl::StatusOr<InsertOutcome> InsertRow(const std::string &database,
-                                          const std::string &table,
-                                          const std::vector<std::string> &cells);
+  absl::StatusOr<InsertOutcome>
+  InsertRow(const std::string &database, const std::string &table,
+            const std::vector<std::string> &cells);
 
   struct QueryResult {
     // One serialized result ciphertext per matched bucket. One entry today; a

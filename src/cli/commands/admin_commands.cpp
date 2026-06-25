@@ -4,8 +4,8 @@
 #include <memory>
 
 #include "../util.h"
-#include "opaquedb/admin/service.h"
 #include "opaquedb/admin/keyring_store.h"
+#include "opaquedb/admin/service.h"
 #include "opaquedb/storage/catalog.h"
 #include "opaquedb/storage/repository.h"
 

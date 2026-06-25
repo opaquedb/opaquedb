@@ -63,8 +63,8 @@ void InsertCommand::Register(CLI::App &parent, const GlobalOptions &globals,
       return;
     }
     std::cout << "inserted 1 row into " << database_ << "." << table_
-              << " (epoch " << result->epoch_version << ", " << result->row_count
-              << " rows total)\n";
+              << " (epoch " << result->epoch_version << ", "
+              << result->row_count << " rows total)\n";
   });
 }
 
