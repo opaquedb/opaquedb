@@ -1,0 +1,10 @@
+id,city,country,temperature,humidity,conditions
+1,Amsterdam,NL,18,72,Cloudy
+2,Tokyo,JP,27,61,Clear
+3,Nairobi,KE,24,55,Sunny
+4,Reykjavik,IS,9,80,Rain
+5,Santiago,CL,21,40,Clear
+6,Toronto,CA,15,67,Overcast
+7,Cairo,EG,33,30,Sunny
+8,Wellington,NZ,13,75,Windy
+9,London,GB,11,77,Drizzle
