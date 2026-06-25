@@ -1,0 +1,31 @@
+#!/bin/sh
+# Debian postinst: create the service user, a default config, and the data dir,
+# then register the systemd unit. Idempotent: safe to run on upgrades.
+set -e
+
+case "$1" in
+configure)
+  if ! getent group opaquedb >/dev/null; then
+    addgroup --system opaquedb
+  fi
+  if ! getent passwd opaquedb >/dev/null; then
+    adduser --system --no-create-home --ingroup opaquedb \
+      --home /var/lib/opaquedb --shell /usr/sbin/nologin opaquedb
+  fi
+
+  mkdir -p /etc/opaquedb /var/lib/opaquedb
+  # Write a default config on first install only; never clobber an edited one.
+  if [ ! -f /etc/opaquedb/opaquedb.toml ]; then
+    /usr/bin/opaquedb config init -o /etc/opaquedb/opaquedb.toml || true
+  fi
+  chown -R opaquedb:opaquedb /var/lib/opaquedb
+  chmod 0750 /var/lib/opaquedb /etc/opaquedb
+
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+    systemctl enable opaquedb.service || true
+  fi
+  ;;
+esac
+
+exit 0

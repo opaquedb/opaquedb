@@ -1,0 +1,16 @@
+#!/bin/sh
+# Debian postrm: reload systemd after removal. On purge, drop the config but
+# keep the data directory: encrypted epochs are the operator's data, not ours
+# to delete silently.
+set -e
+
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || true
+fi
+
+if [ "$1" = "purge" ]; then
+  rm -f /etc/opaquedb/opaquedb.toml
+  rmdir --ignore-fail-on-non-empty /etc/opaquedb 2>/dev/null || true
+fi
+
+exit 0

@@ -1,0 +1,30 @@
+[Unit]
+Description=OpaqueDB node (private query engine over encrypted data)
+Documentation=https://github.com/opaquedb/opaquedb
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opaquedb
+Group=opaquedb
+# Reads /etc/opaquedb/opaquedb.toml by default (the loader's default path).
+ExecStart=/usr/bin/opaquedb run
+Restart=on-failure
+RestartSec=2
+
+# Sandboxing. The node only needs to read its config and write its data dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# StateDirectory creates and owns /var/lib/opaquedb for the service user.
+StateDirectory=opaquedb
+ReadWritePaths=/var/lib/opaquedb
+
+[Install]
+WantedBy=multi-user.target

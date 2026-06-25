@@ -1,0 +1,12 @@
+#!/bin/sh
+# Debian prerm: stop the running node before the files go away.
+set -e
+
+if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+  if [ -d /run/systemd/system ]; then
+    systemctl stop opaquedb.service || true
+    systemctl disable opaquedb.service || true
+  fi
+fi
+
+exit 0

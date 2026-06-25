@@ -1,0 +1,134 @@
+# A multi-node OpaqueDB cluster: one etcd and three identical nodes that elect a
+# leader automatically and shard the data. An init step writes a weather table
+# schema and CSV, then loads a disjoint shard into each node's volume. A client
+# then talks to any node, which fans the encrypted query out to every shard,
+# combines the encrypted partials, and returns the row. The operator never sees
+# the query value or the secret key.
+#
+#   docker compose -f docker/docker-compose.yml up --build -d
+#   docker compose -f docker/docker-compose.yml run --rm tools \
+#     query 'SELECT country, temperature FROM weather WHERE city = "Santiago"' \
+#     --target node1:50051
+#
+# Any of node1/node2/node3 can be the --target; each coordinates equally.
+
+name: opaquedb
+
+x-node-env: &node-env
+  OPAQUEDB_NODE_DATA_DIR: /var/lib/opaquedb
+  OPAQUEDB_SERVER_LISTEN: 0.0.0.0:50051
+  OPAQUEDB_CLUSTER_ENABLED: "true"
+  OPAQUEDB_CLUSTER_ETCD_ENDPOINTS: http://etcd:2379
+  # This is a local demo on a private Docker network, so node-to-node TLS is off.
+  # A real cluster sets cluster.tls_cert/tls_key/ca_cert instead; without one of
+  # those a clustered node refuses to start.
+  OPAQUEDB_CLUSTER_ALLOW_INSECURE: "true"
+  OPAQUEDB_AUTH_MODE: none
+  OPAQUEDB_AUTH_ENABLE_INSECURE: "true"
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.17
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd0
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  # Writes a weather schema and CSV once, then loads each node's disjoint shard
+  # into its volume using the same consistent-hash map the cluster uses.
+  init:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: opaquedb:latest
+    user: root
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        NODES=node1,node2,node3
+        cat > /tmp/weather.sql <<'EOF'
+        CREATE TABLE weather (
+          city TEXT KEY,
+          id INT,
+          country TEXT,
+          temperature INT
+        );
+        EOF
+        cat > /tmp/weather.csv <<'EOF'
+        id,city,country,temperature
+        1,Amsterdam,NL,18
+        2,Tokyo,JP,27
+        3,Nairobi,KE,24
+        4,Reykjavik,IS,9
+        5,Santiago,CL,21
+        6,Toronto,CA,15
+        EOF
+        for n in node1 node2 node3; do
+          opaquedb load --schema /tmp/weather.sql --csv /tmp/weather.csv \
+            --shard-id $$n --shard-nodes $$NODES \
+            --set node.data_dir=/data/$$n
+        done
+        chown -R opaquedb:opaquedb /data
+        echo "init: sharded and published epochs"
+    volumes:
+      - data1:/data/node1
+      - data2:/data/node2
+      - data3:/data/node3
+
+  node1:
+    image: opaquedb:latest
+    depends_on:
+      etcd: {condition: service_healthy}
+      init: {condition: service_completed_successfully}
+    environment:
+      <<: *node-env
+      OPAQUEDB_NODE_ID: node1
+      OPAQUEDB_SERVER_ADVERTISE: node1:50051
+    command: ["run"]
+    volumes:
+      - data1:/var/lib/opaquedb
+
+  node2:
+    image: opaquedb:latest
+    depends_on:
+      etcd: {condition: service_healthy}
+      init: {condition: service_completed_successfully}
+    environment:
+      <<: *node-env
+      OPAQUEDB_NODE_ID: node2
+      OPAQUEDB_SERVER_ADVERTISE: node2:50051
+    command: ["run"]
+    volumes:
+      - data2:/var/lib/opaquedb
+
+  node3:
+    image: opaquedb:latest
+    depends_on:
+      etcd: {condition: service_healthy}
+      init: {condition: service_completed_successfully}
+    environment:
+      <<: *node-env
+      OPAQUEDB_NODE_ID: node3
+      OPAQUEDB_SERVER_ADVERTISE: node3:50051
+    command: ["run"]
+    volumes:
+      - data3:/var/lib/opaquedb
+
+  # A throwaway client container for the dev query subcommand.
+  tools:
+    image: opaquedb:latest
+    profiles: ["tools"]
+    entrypoint: ["/usr/bin/opaquedb"]
+
+volumes:
+  data1:
+  data2:
+  data3:
