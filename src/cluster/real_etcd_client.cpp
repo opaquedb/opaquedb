@@ -20,9 +20,9 @@ namespace {
 // etcdv3 "key not found" error code from etcd-cpp-apiv3.
 constexpr int kKeyNotFound = 100;
 
-// Builds the underlying SyncClient for the chosen auth. TLS wins if both TLS and
-// password settings are present because the simple client does not combine them
-// in one channel. Never logs the password.
+// Builds the underlying SyncClient for the chosen auth. TLS wins if both TLS
+// and password settings are present because the simple client does not combine
+// them in one channel. Never logs the password.
 std::unique_ptr<etcd::SyncClient> MakeSyncClient(const std::string &endpoint,
                                                  const EtcdAuth &auth) {
   if (!auth.ca_cert.empty()) {

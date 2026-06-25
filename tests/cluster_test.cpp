@@ -4,8 +4,8 @@
 #include <string>
 #include <vector>
 
-#include "opaquedb/cluster/manager.h"
 #include "opaquedb/cluster/fake_etcd.h"
+#include "opaquedb/cluster/manager.h"
 #include "opaquedb/cluster/shard_map.h"
 
 namespace {
