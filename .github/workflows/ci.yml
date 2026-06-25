@@ -1,4 +1,4 @@
-name: ci
+name: CI
 
 on:
   push:
@@ -10,9 +10,37 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# The workflow only reads the repository.
+permissions:
+  contents: read
+
 jobs:
-  build-and-test:
+  # Fast style gate. Runs in seconds with no build, so a formatting slip fails
+  # before the expensive toolchain and vcpkg setup ever start.
+  format:
+    name: clang-format
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format
+
+      - name: Check formatting
+        run: |
+          find src tests -type f \( -name '*.cpp' -o -name '*.h' \) \
+            -print0 | xargs -0 clang-format --dry-run --Werror
+
+  # Configure, build, test, and run clang-tidy. Gated behind formatting so we do
+  # not spend build minutes on a branch that will fail the style check anyway.
+  build-and-test:
+    name: build & test
+    needs: format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     env:
       VCPKG_ROOT: /opt/vcpkg
       # Cache vcpkg build artifacts between runs.
@@ -25,7 +53,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             autoconf autoconf-archive automake bison build-essential \
-            clang clang-format clang-tidy cmake curl flex git libtool \
+            clang clang-tidy cmake curl flex git libtool \
             libtool-bin m4 nasm ninja-build perl pkg-config python3 \
             tar unzip zip zlib1g-dev
 
@@ -44,11 +72,6 @@ jobs:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
           key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: vcpkg-${{ runner.os }}-
-
-      - name: clang-format check
-        run: |
-          find src tests -type f \( -name '*.cpp' -o -name '*.h' \) \
-            -print0 | xargs -0 clang-format --dry-run --Werror
 
       - name: Configure
         run: cmake --preset dev

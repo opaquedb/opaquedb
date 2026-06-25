@@ -1,0 +1,4 @@
+# Pin the formatting style so every developer and CI agree regardless of the
+# clang-format version's built-in defaults. This matches the LLVM base the code
+# was already written against (right-aligned pointers, 80 column limit).
+BasedOnStyle: LLVM
