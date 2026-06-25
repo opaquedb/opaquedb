@@ -1,0 +1,317 @@
+#include <gtest/gtest.h>
+
+#include <string>
+#include <vector>
+
+#include "opaquedb/sql/ast.h"
+#include "opaquedb/sql/logical_plan.h"
+#include "opaquedb/sql/parser.h"
+#include "opaquedb/sql/tokenizer.h"
+
+namespace {
+
+using opaquedb::sql::AndPredicate;
+using opaquedb::sql::BetweenPredicate;
+using opaquedb::sql::BuildLogicalPlan;
+using opaquedb::sql::CompareOp;
+using opaquedb::sql::ComparisonPredicate;
+using opaquedb::sql::InPredicate;
+using opaquedb::sql::LikePredicate;
+using opaquedb::sql::LogicalPlanBuilder;
+using opaquedb::sql::OrPredicate;
+using opaquedb::sql::Parse;
+using opaquedb::sql::Predicate;
+using opaquedb::sql::PredicateVisitor;
+using opaquedb::sql::SelectStatement;
+using opaquedb::sql::Tokenize;
+using opaquedb::sql::TokenType;
+
+// ---- Tokenizer -----------------------------------------------------------
+
+TEST(Tokenizer, TokenizesABasicQuery) {
+  auto tokens = Tokenize("SELECT a, b FROM t WHERE k = :p");
+  ASSERT_TRUE(tokens.ok()) << tokens.status().message();
+  std::vector<TokenType> types;
+  for (const auto &t : *tokens)
+    types.push_back(t.type);
+  EXPECT_EQ(types,
+            (std::vector<TokenType>{TokenType::kSelect, TokenType::kIdentifier,
+                                    TokenType::kComma, TokenType::kIdentifier,
+                                    TokenType::kFrom, TokenType::kIdentifier,
+                                    TokenType::kWhere, TokenType::kIdentifier,
+                                    TokenType::kEq, TokenType::kParameter,
+                                    TokenType::kEnd}));
+  EXPECT_EQ((*tokens)[9].text, "p"); // parameter name without the colon
+}
+
+TEST(Tokenizer, KeywordsAreCaseInsensitiveIdentifiersAreNot) {
+  auto tokens = Tokenize("select Col from T where Col = :V");
+  ASSERT_TRUE(tokens.ok());
+  EXPECT_EQ((*tokens)[0].type, TokenType::kSelect);
+  EXPECT_EQ((*tokens)[1].text, "Col"); // identifier case preserved
+  EXPECT_EQ((*tokens)[5].text, "Col");
+}
+
+TEST(Tokenizer, RecognizesAllOperators) {
+  auto tokens = Tokenize("< <= > >= <> != = ( ) ,");
+  ASSERT_TRUE(tokens.ok());
+  EXPECT_EQ((*tokens)[0].type, TokenType::kLt);
+  EXPECT_EQ((*tokens)[1].type, TokenType::kLe);
+  EXPECT_EQ((*tokens)[2].type, TokenType::kGt);
+  EXPECT_EQ((*tokens)[3].type, TokenType::kGe);
+  EXPECT_EQ((*tokens)[4].type, TokenType::kNe);
+  EXPECT_EQ((*tokens)[5].type, TokenType::kNe);
+  EXPECT_EQ((*tokens)[6].type, TokenType::kEq);
+}
+
+TEST(Tokenizer, RejectsBadInput) {
+  EXPECT_FALSE(Tokenize("SELECT a FROM t WHERE k = :").ok()); // bare colon
+  EXPECT_FALSE(Tokenize("SELECT a FROM t WHERE k = @").ok()); // stray char
+  EXPECT_FALSE(Tokenize("SELECT a WHERE x = 'oops").ok());    // unterminated
+  EXPECT_FALSE(Tokenize(std::string(70000, 'a')).ok());       // over length
+}
+
+// ---- Parser --------------------------------------------------------------
+
+const ComparisonPredicate *AsComparison(const Predicate *p) {
+  return dynamic_cast<const ComparisonPredicate *>(p);
+}
+
+TEST(Parser, ParsesSupportedSelect) {
+  auto stmt = Parse("SELECT v, w FROM users WHERE id = :id");
+  ASSERT_TRUE(stmt.ok()) << stmt.status().message();
+  EXPECT_EQ(stmt->table, "users");
+  EXPECT_EQ(stmt->projection, (std::vector<std::string>{"v", "w"}));
+  const ComparisonPredicate *cmp = AsComparison(stmt->where.get());
+  ASSERT_NE(cmp, nullptr);
+  EXPECT_EQ(cmp->column(), "id");
+  EXPECT_EQ(cmp->op(), CompareOp::kEq);
+  EXPECT_EQ(cmp->parameter().name, "id");
+}
+
+TEST(Parser, ParsesEachComparisonOperator) {
+  struct Case {
+    std::string sql;
+    CompareOp op;
+  };
+  for (const Case &c :
+       std::vector<Case>{{"SELECT a FROM t WHERE k <> :p", CompareOp::kNe},
+                         {"SELECT a FROM t WHERE k < :p", CompareOp::kLt},
+                         {"SELECT a FROM t WHERE k <= :p", CompareOp::kLe},
+                         {"SELECT a FROM t WHERE k > :p", CompareOp::kGt},
+                         {"SELECT a FROM t WHERE k >= :p", CompareOp::kGe}}) {
+    auto stmt = Parse(c.sql);
+    ASSERT_TRUE(stmt.ok()) << c.sql << ": " << stmt.status().message();
+    const ComparisonPredicate *cmp = AsComparison(stmt->where.get());
+    ASSERT_NE(cmp, nullptr) << c.sql;
+    EXPECT_EQ(cmp->op(), c.op) << c.sql;
+  }
+}
+
+TEST(Parser, ParsesFutureOperatorsIntoNodes) {
+  auto in = Parse("SELECT a FROM t WHERE k IN (:a, :b, :c)");
+  ASSERT_TRUE(in.ok()) << in.status().message();
+  const auto *in_node = dynamic_cast<const InPredicate *>(in->where.get());
+  ASSERT_NE(in_node, nullptr);
+  EXPECT_EQ(in_node->parameters().size(), 3u);
+
+  auto like = Parse("SELECT a FROM t WHERE name LIKE :pat");
+  ASSERT_TRUE(like.ok());
+  EXPECT_NE(dynamic_cast<const LikePredicate *>(like->where.get()), nullptr);
+
+  auto between = Parse("SELECT a FROM t WHERE k BETWEEN :lo AND :hi");
+  ASSERT_TRUE(between.ok()) << between.status().message();
+  const auto *bt = dynamic_cast<const BetweenPredicate *>(between->where.get());
+  ASSERT_NE(bt, nullptr);
+  EXPECT_EQ(bt->low().name, "lo");
+  EXPECT_EQ(bt->high().name, "hi");
+
+  auto conj = Parse("SELECT a FROM t WHERE k = :p AND j = :q");
+  ASSERT_TRUE(conj.ok());
+  EXPECT_NE(dynamic_cast<const AndPredicate *>(conj->where.get()), nullptr);
+
+  auto disj = Parse("SELECT a FROM t WHERE k = :p OR j = :q");
+  ASSERT_TRUE(disj.ok());
+  EXPECT_NE(dynamic_cast<const OrPredicate *>(disj->where.get()), nullptr);
+}
+
+TEST(Parser, ParsesInlineLiteralValue) {
+  // The parser now accepts literals; they are the client's sugar. Both single
+  // and double quotes are strings.
+  for (const char *sql : {"SELECT a FROM t WHERE k = 'London'",
+                          "SELECT a FROM t WHERE k = \"London\""}) {
+    auto stmt = Parse(sql);
+    ASSERT_TRUE(stmt.ok()) << sql;
+    const auto *cmp =
+        dynamic_cast<const ComparisonPredicate *>(stmt->where.get());
+    ASSERT_NE(cmp, nullptr);
+    ASSERT_TRUE(cmp->parameter().is_literal());
+    EXPECT_EQ(std::get<std::string>(*cmp->parameter().literal), "London");
+  }
+  auto num = Parse("SELECT a FROM t WHERE k = 42");
+  ASSERT_TRUE(num.ok());
+  const auto *cmp = dynamic_cast<const ComparisonPredicate *>(num->where.get());
+  ASSERT_NE(cmp, nullptr);
+  ASSERT_TRUE(cmp->parameter().is_literal());
+  EXPECT_EQ(std::get<std::int64_t>(*cmp->parameter().literal), 42);
+}
+
+TEST(LogicalPlan, RejectsLiteralBecauseItMustBeStrippedClientSide) {
+  // A literal must never reach the server; the plan builder refuses it.
+  auto stmt = Parse("SELECT a FROM t WHERE k = 'London'");
+  ASSERT_TRUE(stmt.ok());
+  auto plan = BuildLogicalPlan(*stmt);
+  EXPECT_FALSE(plan.ok());
+  EXPECT_EQ(plan.status().code(), absl::StatusCode::kInvalidArgument);
+}
+
+TEST(Parser, PrepareClientQueryStripsLiteral) {
+  using opaquedb::sql::PrepareClientQuery;
+  auto p = PrepareClientQuery("SELECT temperature FROM weather WHERE city = "
+                              "\"London\"");
+  ASSERT_TRUE(p.ok());
+  ASSERT_TRUE(p->literal.has_value());
+  EXPECT_EQ(std::get<std::string>(*p->literal), "London");
+  // The rewritten template carries a bound parameter, no literal, and parses
+  // and plans cleanly server-side.
+  EXPECT_EQ(p->sql_template, "SELECT temperature FROM weather WHERE city = :v");
+  auto stmt = Parse(p->sql_template);
+  ASSERT_TRUE(stmt.ok());
+  EXPECT_TRUE(BuildLogicalPlan(*stmt).ok());
+
+  // An already-parameterized query passes through unchanged.
+  auto q = PrepareClientQuery("SELECT a FROM t WHERE k = :id");
+  ASSERT_TRUE(q.ok());
+  EXPECT_FALSE(q->literal.has_value());
+  EXPECT_EQ(q->sql_template, "SELECT a FROM t WHERE k = :id");
+}
+
+TEST(Parser, ParsesSelectStar) {
+  auto stmt = Parse("SELECT * FROM weather WHERE city = :c");
+  ASSERT_TRUE(stmt.ok()) << stmt.status().message();
+  EXPECT_TRUE(stmt->select_all);
+  EXPECT_TRUE(stmt->projection.empty());
+  EXPECT_EQ(stmt->table, "weather");
+}
+
+TEST(Parser, AcceptsTrailingSemicolon) {
+  auto a = Parse("SELECT v FROM t WHERE k = :p;");
+  ASSERT_TRUE(a.ok()) << a.status().message();
+  EXPECT_EQ(a->projection, (std::vector<std::string>{"v"}));
+  auto b = Parse("SELECT * FROM t WHERE k = :p ;  ");
+  ASSERT_TRUE(b.ok()) << b.status().message();
+  EXPECT_TRUE(b->select_all);
+  // A literal query with a trailing semicolon still strips to a clean template.
+  auto p = opaquedb::sql::PrepareClientQuery(
+      "SELECT v FROM t WHERE city = \"London\";");
+  ASSERT_TRUE(p.ok());
+  EXPECT_EQ(p->sql_template, "SELECT v FROM t WHERE city = :v");
+  ASSERT_TRUE(p->literal.has_value());
+}
+
+TEST(Parser, RejectsMalformedStatements) {
+  EXPECT_FALSE(Parse("").ok());
+  EXPECT_FALSE(Parse("SELECT FROM t WHERE k = :p").ok());         // no columns
+  EXPECT_FALSE(Parse("SELECT a t WHERE k = :p").ok());            // no FROM
+  EXPECT_FALSE(Parse("SELECT a FROM t k = :p").ok());             // no WHERE
+  EXPECT_FALSE(Parse("SELECT a FROM t WHERE k :p").ok());         // no operator
+  EXPECT_FALSE(Parse("SELECT a FROM t WHERE k = :p extra").ok()); // trailing
+  EXPECT_FALSE(Parse("SELECT a FROM t WHERE k IN (:a,)").ok());   // dangling
+  EXPECT_FALSE(Parse("SELECT a FROM t WHERE k IN (:a").ok());     // unclosed
+  EXPECT_FALSE(Parse("SELECT a FROM t WHERE k BETWEEN :lo :hi").ok()); // no AND
+}
+
+// ---- Visitor -------------------------------------------------------------
+
+// A visitor that counts the predicate nodes it reaches, to show the AST is
+// walked through the visitor interface.
+class CountingVisitor : public PredicateVisitor {
+public:
+  absl::Status Visit(const ComparisonPredicate &) override {
+    ++comparisons;
+    return absl::OkStatus();
+  }
+  absl::Status Visit(const InPredicate &) override { return absl::OkStatus(); }
+  absl::Status Visit(const LikePredicate &) override {
+    return absl::OkStatus();
+  }
+  absl::Status Visit(const BetweenPredicate &) override {
+    return absl::OkStatus();
+  }
+  absl::Status Visit(const AndPredicate &node) override {
+    ++ands;
+    if (auto s = node.left().Accept(*this); !s.ok())
+      return s;
+    return node.right().Accept(*this);
+  }
+  absl::Status Visit(const OrPredicate &node) override {
+    if (auto s = node.left().Accept(*this); !s.ok())
+      return s;
+    return node.right().Accept(*this);
+  }
+  int comparisons = 0;
+  int ands = 0;
+};
+
+TEST(Visitor, WalksTheTree) {
+  auto stmt = Parse("SELECT a FROM t WHERE k = :p AND j = :q AND i = :r");
+  ASSERT_TRUE(stmt.ok());
+  CountingVisitor visitor;
+  ASSERT_TRUE(stmt->where->Accept(visitor).ok());
+  EXPECT_EQ(visitor.comparisons, 3);
+  EXPECT_EQ(visitor.ands, 2);
+}
+
+// ---- Logical plan --------------------------------------------------------
+
+TEST(LogicalPlan, BuildsForSupportedEquality) {
+  auto stmt = Parse("SELECT v, w FROM t WHERE k = :key");
+  ASSERT_TRUE(stmt.ok());
+  auto plan = BuildLogicalPlan(*stmt);
+  ASSERT_TRUE(plan.ok()) << plan.status().message();
+  EXPECT_EQ(plan->table, "t");
+  EXPECT_EQ(plan->projection, (std::vector<std::string>{"v", "w"}));
+  EXPECT_EQ(plan->match_column, "k");
+  EXPECT_EQ(plan->op, CompareOp::kEq);
+  EXPECT_EQ(plan->parameter, "key");
+}
+
+TEST(LogicalPlan, RejectsUnimplementedOperators) {
+  const std::vector<std::string> cases = {
+      "SELECT a FROM t WHERE k <> :p",
+      "SELECT a FROM t WHERE k < :p",
+      "SELECT a FROM t WHERE k IN (:a, :b)",
+      "SELECT a FROM t WHERE name LIKE :p",
+      "SELECT a FROM t WHERE k BETWEEN :lo AND :hi",
+      "SELECT a FROM t WHERE k = :p AND j = :q",
+      "SELECT a FROM t WHERE k = :p OR j = :q",
+  };
+  for (const std::string &sql : cases) {
+    auto stmt = Parse(sql);
+    ASSERT_TRUE(stmt.ok()) << sql << ": " << stmt.status().message();
+    auto plan = BuildLogicalPlan(*stmt);
+    EXPECT_FALSE(plan.ok()) << sql;
+    EXPECT_EQ(plan.status().code(), absl::StatusCode::kUnimplemented) << sql;
+  }
+}
+
+TEST(LogicalPlan, RejectsDuplicateProjection) {
+  auto stmt = Parse("SELECT a, a FROM t WHERE k = :p");
+  ASSERT_TRUE(stmt.ok());
+  EXPECT_FALSE(BuildLogicalPlan(*stmt).ok());
+}
+
+TEST(LogicalPlan, BuilderValidatesRequiredFields) {
+  LogicalPlanBuilder empty;
+  EXPECT_FALSE(empty.Build().ok()); // no table, no projection, no match
+
+  LogicalPlanBuilder no_match;
+  no_match.SetTable("t").AddProjection("a");
+  EXPECT_FALSE(no_match.Build().ok());
+
+  LogicalPlanBuilder full;
+  full.SetTable("t").AddProjection("a").SetMatch("k", CompareOp::kEq, "p");
+  EXPECT_TRUE(full.Build().ok());
+}
+
+} // namespace
