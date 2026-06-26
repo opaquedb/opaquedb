@@ -56,6 +56,7 @@ poly_modulus_degree = 16384          # power of two
 plain_modulus_bits = 20
 coeff_modulus_bits = [60, 60, 60, 60, 60, 49]
 key_bits = 16                        # key universe 2^key_bits; eq depth 1+log2
+result_buckets = 16                  # LIMIT/OFFSET buckets; max same-key rows per page
 
 [storage]
 record_bytes = 128                   # fixed payload record size; sets plane count

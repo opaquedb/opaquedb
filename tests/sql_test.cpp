@@ -194,6 +194,64 @@ TEST(Parser, ParsesSelectStar) {
   EXPECT_EQ(stmt->table, "weather");
 }
 
+TEST(Parser, ParsesLimitAndOffset) {
+  auto both = Parse("SELECT a FROM t WHERE k = :p LIMIT 5 OFFSET 10");
+  ASSERT_TRUE(both.ok()) << both.status().message();
+  ASSERT_TRUE(both->limit.has_value());
+  EXPECT_EQ(*both->limit, 5u);
+  ASSERT_TRUE(both->offset.has_value());
+  EXPECT_EQ(*both->offset, 10u);
+
+  // Both clauses are optional and independent.
+  auto none = Parse("SELECT a FROM t WHERE k = :p");
+  ASSERT_TRUE(none.ok());
+  EXPECT_FALSE(none->limit.has_value());
+  EXPECT_FALSE(none->offset.has_value());
+
+  auto limit_only = Parse("SELECT a FROM t WHERE k = :p LIMIT 3");
+  ASSERT_TRUE(limit_only.ok());
+  EXPECT_EQ(*limit_only->limit, 3u);
+  EXPECT_FALSE(limit_only->offset.has_value());
+
+  auto offset_only = Parse("SELECT a FROM t WHERE k = :p OFFSET 7");
+  ASSERT_TRUE(offset_only.ok());
+  EXPECT_FALSE(offset_only->limit.has_value());
+  EXPECT_EQ(*offset_only->offset, 7u);
+
+  // LIMIT/OFFSET is case-insensitive and survives a trailing semicolon.
+  auto mixed = Parse("select a from t where k = :p limit 2 offset 4;");
+  ASSERT_TRUE(mixed.ok()) << mixed.status().message();
+  EXPECT_EQ(*mixed->limit, 2u);
+  EXPECT_EQ(*mixed->offset, 4u);
+}
+
+TEST(Parser, RejectsBadLimitOffset) {
+  EXPECT_FALSE(
+      Parse("SELECT a FROM t WHERE k = :p LIMIT 0").ok()); // must be >=1
+  EXPECT_FALSE(
+      Parse("SELECT a FROM t WHERE k = :p LIMIT :n").ok()); // not bound
+  EXPECT_FALSE(
+      Parse("SELECT a FROM t WHERE k = :p LIMIT").ok()); // missing count
+  EXPECT_FALSE(Parse("SELECT a FROM t WHERE k = :p OFFSET 2 LIMIT 1")
+                   .ok()); // wrong order
+}
+
+TEST(Parser, PrepareClientQueryKeepsLimitAndStripsLiteral) {
+  using opaquedb::sql::PrepareClientQuery;
+  // The LIMIT/OFFSET numbers must not be mistaken for the secret match value.
+  auto p = PrepareClientQuery(
+      "SELECT t FROM weather WHERE city = \"London\" LIMIT 4 OFFSET 8");
+  ASSERT_TRUE(p.ok()) << p.status().message();
+  ASSERT_TRUE(p->literal.has_value());
+  EXPECT_EQ(std::get<std::string>(*p->literal), "London");
+  EXPECT_EQ(p->sql_template,
+            "SELECT t FROM weather WHERE city = :v LIMIT 4 OFFSET 8");
+  ASSERT_TRUE(p->limit.has_value());
+  EXPECT_EQ(*p->limit, 4u);
+  ASSERT_TRUE(p->offset.has_value());
+  EXPECT_EQ(*p->offset, 8u);
+}
+
 TEST(Parser, AcceptsTrailingSemicolon) {
   auto a = Parse("SELECT v FROM t WHERE k = :p;");
   ASSERT_TRUE(a.ok()) << a.status().message();

@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "admin.grpc.pb.h"
@@ -116,6 +118,79 @@ TEST_F(ServerEndToEnd, PrivateSelectReturnsTheRightRow) {
   ASSERT_TRUE(rows.ok()) << rows.status().message();
   ASSERT_EQ(rows->size(), 1u);
   EXPECT_EQ(TextValue((*rows)[0]), "value-3");
+
+  (*node)->Shutdown();
+}
+
+// Several rows share one key. A LIMIT query partitions matches into buckets and
+// returns all of them; this is the end-to-end multi-result path from SQL
+// through the matcher to the client decode.
+TEST_F(ServerEndToEnd, LimitReturnsAllRowsSharingAKey) {
+  std::vector<IngestRow> data;
+  for (int i = 0; i < 5; ++i) {
+    data.push_back(IngestRow{Value{std::int64_t{7}},
+                             {Value{std::string("dup-" + std::to_string(i))}}});
+  }
+  data.push_back(
+      IngestRow{Value{std::int64_t{1}}, {Value{std::string("one")}}});
+  auto staging = BuildStagingFromRows(cfg_, KvSchema(), data);
+  ASSERT_TRUE(staging.ok()) << staging.status().message();
+  auto repo = LocalEpochRepository::Open(cfg_.EpochRootFor("default", "t"));
+  ASSERT_TRUE(repo.ok());
+  ASSERT_TRUE((*repo)->Publish(*staging, 1).ok());
+
+  auto node = NodeServer::Create(cfg_);
+  ASSERT_TRUE(node.ok());
+  ASSERT_TRUE((*node)->Start().ok());
+  ASSERT_TRUE((*node)->WaitForReady().ok());
+
+  auto client = QueryClient::Create(cfg_, (*node)->listen_address());
+  ASSERT_TRUE(client.ok()) << client.status().message();
+  ASSERT_TRUE((*client)->Register("c1").ok());
+
+  auto query = [&](const std::string &sql) {
+    std::uint32_t collided = 0;
+    auto rows = (*client)->Query("c1", sql, 7, "", "default", &collided);
+    EXPECT_TRUE(rows.ok()) << rows.status().message();
+    std::vector<std::string> got;
+    for (const std::vector<std::uint8_t> &r : *rows)
+      got.push_back(TextValue(r));
+    std::sort(got.begin(), got.end());
+    return std::make_pair(got, collided);
+  };
+
+  // LIMIT counts rows, not buckets: a wide LIMIT returns every row sharing the
+  // key, with no collisions at the default bucket count.
+  auto [all, all_collided] = query("SELECT v FROM t WHERE k = :k LIMIT 16");
+  EXPECT_EQ(all_collided, 0u);
+  EXPECT_EQ(all, (std::vector<std::string>{"dup-0", "dup-1", "dup-2", "dup-3",
+                                           "dup-4"}))
+      << "all five rows with key 7 must come back";
+
+  // The default (no LIMIT) returns exactly one matching row, not a self
+  // collision, even though five rows share the key.
+  auto [one, one_collided] = query("SELECT v FROM t WHERE k = :k");
+  EXPECT_EQ(one_collided, 0u);
+  EXPECT_EQ(one.size(), 1u) << "default LIMIT 1 returns one clean row";
+
+  // LIMIT 2 returns two rows; LIMIT 3 returns three. They are a stable prefix
+  // of the full result, so the counts line up.
+  EXPECT_EQ(query("SELECT v FROM t WHERE k = :k LIMIT 2").first.size(), 2u);
+  EXPECT_EQ(query("SELECT v FROM t WHERE k = :k LIMIT 3").first.size(), 3u);
+
+  // OFFSET pages through the rows: LIMIT 2 then LIMIT 2 OFFSET 2 are disjoint
+  // and together with OFFSET 4 cover all five exactly once.
+  std::vector<std::string> paged;
+  for (const char *sql : {"SELECT v FROM t WHERE k = :k LIMIT 2",
+                          "SELECT v FROM t WHERE k = :k LIMIT 2 OFFSET 2",
+                          "SELECT v FROM t WHERE k = :k LIMIT 2 OFFSET 4"}) {
+    for (const std::string &v : query(sql).first)
+      paged.push_back(v);
+  }
+  std::sort(paged.begin(), paged.end());
+  EXPECT_EQ(paged, (std::vector<std::string>{"dup-0", "dup-1", "dup-2", "dup-3",
+                                             "dup-4"}))
+      << "paging by OFFSET covers every row once";
 
   (*node)->Shutdown();
 }

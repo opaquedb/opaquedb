@@ -223,7 +223,9 @@ grpc::Status QueryService::Execute(grpc::ServerContext *context,
                  result.status().message());
     return ToGrpcStatus(result.status());
   }
-  spdlog::info("query from client {} returned {} record(s)",
+  // The count is encrypted result blobs, not rows: all result buckets pack into
+  // one blob and the operator never learns how many rows the client decodes.
+  spdlog::info("query from client {} returned {} encrypted result(s)",
                request->client_id(), result->encrypted_results.size());
   for (std::string &bytes : result->encrypted_results) {
     reply->add_encrypted_result(std::move(bytes));

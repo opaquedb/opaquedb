@@ -31,6 +31,8 @@ enum class TokenType {
   kIn,
   kLike,
   kBetween,
+  kLimit,
+  kOffset,
   kCreate,
   kTable,
   kKey,

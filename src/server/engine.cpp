@@ -81,7 +81,8 @@ Engine::Create(const config::CryptoConfig &crypto_cfg,
   if (!ctx.ok())
     return ctx.status();
   return std::unique_ptr<Engine>(
-      new Engine(*std::move(ctx), std::move(resolver), keyring, registry));
+      new Engine(*std::move(ctx), std::move(resolver), keyring, registry,
+                 crypto_cfg.result_buckets));
 }
 
 absl::Status Engine::RegisterClient(const std::string &client_id,
@@ -244,6 +245,15 @@ absl::StatusOr<Engine::ShardResult> Engine::EvaluateShard(
   backend::EncryptedQuery query;
   query.op = plan->op;
   query.query = std::move((*operand)[0]);
+  // Always partition matches into result_buckets buckets, independent of the
+  // query's LIMIT/OFFSET. The whole partition rides in one ciphertext at no
+  // extra cost, so the client decodes every bucket and applies LIMIT/OFFSET as
+  // a row skip/take. This keeps LIMIT meaning "rows", not "bucket slots", and
+  // lets even a default single-row query return one clean row from a duplicated
+  // key instead of a self-collision. A deployment that sets result_buckets = 1
+  // opts back into the single-bucket collapse (unique-key only).
+  // plan->limit/offset are public and resolved on the client.
+  query.result_buckets = result_buckets_;
 
   backend::KeyColumn keys;
   backend::PayloadColumns payload;

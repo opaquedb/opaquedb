@@ -1,6 +1,7 @@
 #ifndef OPAQUEDB_SERVER_ENGINE_H_
 #define OPAQUEDB_SERVER_ENGINE_H_
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -128,9 +129,11 @@ public:
 
 private:
   Engine(crypto::CryptoContext ctx, RepositoryResolver resolver,
-         admin::KeyringStore *keyring, const backend::BackendRegistry &registry)
+         admin::KeyringStore *keyring, const backend::BackendRegistry &registry,
+         std::uint32_t result_buckets)
       : ctx_(std::move(ctx)), resolve_repo_(std::move(resolver)),
-        keyring_(keyring), registry_(registry), planner_(registry) {}
+        keyring_(keyring), registry_(registry), planner_(registry),
+        result_buckets_(result_buckets) {}
 
   // Returns the client's evaluation context for a backend, deserializing the
   // keys once and caching the result. Re-deserializing the (multi-megabyte)
@@ -145,6 +148,8 @@ private:
   admin::KeyringStore *keyring_;
   const backend::BackendRegistry &registry_;
   planner::Planner planner_;
+  // The configured result-bucket count for multi-match (LIMIT/OFFSET) queries.
+  std::uint32_t result_buckets_;
   std::mutex eval_cache_mu_;
   std::map<std::string, std::shared_ptr<backend::EvalContext>> eval_cache_;
 };

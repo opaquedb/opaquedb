@@ -1,6 +1,7 @@
 #ifndef OPAQUEDB_SQL_PARSER_H_
 #define OPAQUEDB_SQL_PARSER_H_
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -42,6 +43,10 @@ struct PreparedQuery {
   std::string sql_template;           // parameterized, safe to send
   std::optional<core::Value> literal; // the value to encrypt, if any
   std::string param_name;             // the bound name used for the literal
+  // The LIMIT/OFFSET from the template, so the client knows how many result
+  // buckets to decode and from where. Unset limit means the default of 1.
+  std::optional<std::uint64_t> limit;
+  std::optional<std::uint64_t> offset;
 };
 
 absl::StatusOr<PreparedQuery> PrepareClientQuery(std::string_view sql);

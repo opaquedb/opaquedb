@@ -155,6 +155,7 @@ constexpr std::string_view kKeys[] = {
     "crypto.plain_modulus_bits",
     "crypto.coeff_modulus_bits",
     "crypto.key_bits",
+    "crypto.result_buckets",
     "storage.record_bytes",
     "storage.epoch_dir",
     "auth.mode",
@@ -301,6 +302,11 @@ absl::Status ApplyKeyValue(Config &config, std::string_view key,
     if (!v.ok())
       return v.status();
     config.crypto.key_bits = *v;
+  } else if (key == "crypto.result_buckets") {
+    auto v = ParseU32(key, value);
+    if (!v.ok())
+      return v.status();
+    config.crypto.result_buckets = *v;
   } else if (key == "storage.record_bytes") {
     auto v = ParseU32(key, value);
     if (!v.ok())
@@ -389,6 +395,22 @@ absl::Status Validate(const Config &config) {
         absl::StrCat("crypto.key_bits (", c.key_bits,
                      ") must not exceed poly_modulus_degree/2 (",
                      c.poly_modulus_degree / 2, ")"));
+  }
+  if (c.result_buckets == 0 || !IsPowerOfTwo(c.result_buckets)) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "crypto.result_buckets must be a positive power of two, got ",
+        c.result_buckets));
+  }
+  // Each bucket is one block (key_bits slots) wide after the partial block-sum,
+  // so the bucket count cannot exceed the number of blocks in one BatchEncoder
+  // row. With both a power of two this also guarantees it divides evenly.
+  if (const std::uint32_t blocks_per_row =
+          (c.poly_modulus_degree / 2) / c.key_bits;
+      c.result_buckets > blocks_per_row) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("crypto.result_buckets (", c.result_buckets,
+                     ") must not exceed (poly_modulus_degree/2)/key_bits (",
+                     blocks_per_row, ")"));
   }
   if (config.storage.record_bytes == 0) {
     return absl::InvalidArgumentError("storage.record_bytes must be positive");
@@ -536,7 +558,9 @@ std::string ToToml(const Config &config) {
           {"plain_modulus_bits",
            static_cast<std::int64_t>(config.crypto.plain_modulus_bits)},
           {"coeff_modulus_bits", std::move(coeff)},
-          {"key_bits", static_cast<std::int64_t>(config.crypto.key_bits)}});
+          {"key_bits", static_cast<std::int64_t>(config.crypto.key_bits)},
+          {"result_buckets",
+           static_cast<std::int64_t>(config.crypto.result_buckets)}});
   root.insert("storage",
               toml::table{{"record_bytes", static_cast<std::int64_t>(
                                                config.storage.record_bytes)},

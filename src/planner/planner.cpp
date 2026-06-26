@@ -89,6 +89,8 @@ Planner::Plan(const core::Schema &schema, const sql::LogicalPlan &logical,
   plan.match_column = logical.match_column;
   plan.match_column_index = *match_index;
   plan.parameter = logical.parameter;
+  plan.limit = logical.limit;
+  plan.offset = logical.offset;
 
   if (logical.select_all) {
     // SELECT * expands to every payload (RAW) column in schema order. The match
