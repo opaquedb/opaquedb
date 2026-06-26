@@ -2,15 +2,19 @@
 
 ## Build and test
 
+Common tasks live in the `Makefile` so CI and contributors run the same
+commands. `make help` lists them.
+
 ```sh
 export VCPKG_ROOT=/opt/vcpkg
-cmake --preset dev
-cmake --build --preset dev
-ctest --preset dev
+make configure
+make build
+make test
 ```
 
 The build must be warning-clean. The `dev` preset sets `OPAQUEDB_WERROR=ON`, so
-warnings in first-party code fail the build.
+warnings in first-party code fail the build. Run `make lint` before pushing to
+match the CI style and clang-tidy checks.
 
 ## Layering
 

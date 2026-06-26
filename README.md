@@ -109,8 +109,8 @@ Load it, start a node, and query by the key. The example files live in
 Load the example data and start a node (local insecure dev mode):
 
 ```sh
-opaquedb load --schema examples/weather.sql --csv examples/weather.csv
 opaquedb run --set auth.mode=none --set auth.enable_insecure=true &
+opaquedb load --schema examples/weather.sql --csv examples/weather.csv
 ```
 
 Then open the interactive shell and run private queries by the key:
@@ -173,12 +173,19 @@ row under encryption and returns only the encrypted match.
 The build uses CMake with Ninja and vcpkg in manifest mode. Dependencies are
 pinned by the `builtin-baseline` in `vcpkg.json`.
 
+Common tasks run through the `Makefile`, which is the single source of truth for
+build, test, lint, and packaging commands (CI invokes the same targets):
+
 ```sh
 export VCPKG_ROOT=/opt/vcpkg   # provided by the dev container
-cmake --preset dev             # first configure builds dependencies
-cmake --build build/dev
-cd build/dev && ctest
+make configure                 # first run builds dependencies via vcpkg
+make build
+make test
 ```
+
+Run `make help` to list every target. Useful ones: `make lint` (clang-format and
+clang-tidy), `make package` (release `.deb` and `.tar.gz`), and `PRESET=release`
+on `configure`/`build` for an optimized build.
 
 The dev container in `.devcontainer/` provides the C++20 toolchain and vcpkg.
 The first configure is slow because vcpkg builds dependencies from source; later

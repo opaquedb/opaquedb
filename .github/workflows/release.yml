@@ -47,15 +47,15 @@ jobs:
           restore-keys: vcpkg-release-${{ runner.os }}-
 
       - name: Configure
-        run: cmake --preset release
+        run: make configure PRESET=release
 
       - name: Build
-        run: cmake --build --preset release
+        run: make build PRESET=release
 
       # Produces opaquedb_<version>_amd64.deb and opaquedb-<version>-Linux.tar.gz
       # from the CPack config in CMakeLists.txt (DEB;TGZ).
       - name: Package
-        run: cd build/release && cpack
+        run: make package
 
       # Guard against a tag that does not match the built binary's version.
       - name: Verify version matches tag

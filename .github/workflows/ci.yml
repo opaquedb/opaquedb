@@ -30,9 +30,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang-format
 
       - name: Check formatting
-        run: |
-          find src tests -type f \( -name '*.cpp' -o -name '*.h' \) \
-            -print0 | xargs -0 clang-format --dry-run --Werror
+        run: make format-check
 
   # Configure, build, test, and run clang-tidy. Gated behind formatting so we do
   # not spend build minutes on a branch that will fail the style check anyway.
@@ -74,15 +72,13 @@ jobs:
           restore-keys: vcpkg-${{ runner.os }}-
 
       - name: Configure
-        run: cmake --preset dev
+        run: make configure
 
       - name: Build
-        run: cmake --build --preset dev
+        run: make build
 
       - name: Test
-        run: ctest --preset dev
+        run: make test
 
       - name: clang-tidy
-        run: |
-          find src -type f -name '*.cpp' -print0 \
-            | xargs -0 clang-tidy -p build/dev
+        run: make tidy
