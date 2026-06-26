@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
 
 # Cancel superseded runs on the same ref so the queue stays short.
@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install clang-format
         run: |
@@ -30,30 +30,46 @@ jobs:
           sudo apt-get install -y --no-install-recommends clang-format
 
       - name: Check formatting
-        run: |
-          find src tests -type f \( -name '*.cpp' -o -name '*.h' \) \
-            -print0 | xargs -0 clang-format --dry-run --Werror
+        run: make format-check
 
-  # Configure, build, test, and run clang-tidy. Gated behind formatting so we do
-  # not spend build minutes on a branch that will fail the style check anyway.
+  # Configure, build, and test. Gated behind formatting so we do not spend
+  # build minutes on a branch that will fail the style check anyway. clang-tidy
+  # is intentionally left out of CI: it re-analyzes every source on top of the
+  # build and roughly doubled the job time. Run `make tidy` locally instead.
   build-and-test:
     name: build & test
     needs: format
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # Generous ceiling: a cold cache rebuilds boost, gRPC, protobuf, SEAL, and
+    # etcd from source, which can run well past an hour. Once the vcpkg cache is
+    # warm, later runs finish in a fraction of this.
+    timeout-minutes: 180
     env:
       VCPKG_ROOT: /opt/vcpkg
       # Cache vcpkg build artifacts between runs.
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-cache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      # GitHub runners ship with ~14 GB free, but vcpkg builds boost, gRPC,
+      # protobuf, SEAL, and etcd from source. Reclaim ~25-30 GB of preinstalled
+      # toolchains we never use so the disk does not fill mid-build (a full disk
+      # crashes the runner itself and aborts the vcpkg cache upload, so every
+      # later run also rebuilds from scratch).
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}"
+          sudo docker image prune --all --force || true
+          df -h /
 
       - name: Install toolchain
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             autoconf autoconf-archive automake bison build-essential \
-            clang clang-tidy cmake curl flex git libtool \
+            clang cmake curl flex git libtool \
             libtool-bin m4 nasm ninja-build perl pkg-config python3 \
             tar unzip zip zlib1g-dev
 
@@ -74,15 +90,10 @@ jobs:
           restore-keys: vcpkg-${{ runner.os }}-
 
       - name: Configure
-        run: cmake --preset dev
+        run: make configure
 
       - name: Build
-        run: cmake --build --preset dev
+        run: make build
 
       - name: Test
-        run: ctest --preset dev
-
-      - name: clang-tidy
-        run: |
-          find src -type f -name '*.cpp' -print0 \
-            | xargs -0 clang-tidy -p build/dev
+        run: make test

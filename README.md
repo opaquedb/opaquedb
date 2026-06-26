@@ -106,14 +106,33 @@ id,city,country,temperature,humidity,conditions
 Load it, start a node, and query by the key. The example files live in
 `examples/`:
 
-```sh
-odb="build/dev-local/opaquedb --set auth.mode=none --set auth.enable_insecure=true"
+Load the example data and start a node (local insecure dev mode):
 
-$odb load --schema examples/weather.sql --csv examples/weather.csv
-$odb run &
-$odb query 'SELECT country, temperature, conditions FROM weather WHERE city = "Amsterdam"' \
-  --schema examples/weather.sql
-# country=NL temperature=18 conditions=Cloudy
+```sh
+opaquedb run --set auth.mode=none --set auth.enable_insecure=true &
+opaquedb load --schema examples/weather.sql --csv examples/weather.csv
+```
+
+Then open the interactive shell and run private queries by the key:
+
+```console
+$ opaquedb repl --schema examples/weather.sql
+OpaqueDB shell. \help for commands, \quit to exit.
+opaquedb(default)> SELECT country, temperature, conditions FROM weather WHERE city = "Amsterdam"
+country=NL temperature=18 conditions=Cloudy
+opaquedb(default)> SELECT country, temperature FROM weather WHERE city = "Tokyo"
+country=JP temperature=27
+opaquedb(default)> SELECT country FROM weather WHERE city = "Atlantis"
+(no rows)
+opaquedb(default)> \quit
+```
+
+A one-shot query works the same way and prints the decoded row:
+
+```console
+$ opaquedb query 'SELECT country, temperature, conditions FROM weather WHERE city = "Amsterdam"' \
+    --schema examples/weather.sql
+country=NL temperature=18 conditions=Cloudy
 ```
 
 `"Amsterdam"` is encrypted before it leaves the client. The node scans every
@@ -121,13 +140,20 @@ row under encryption and returns only the encrypted match.
 
 ## What it is not
 
-- Not a general SQL engine. The evaluated query is
+- Not a full SQL engine yet. Today the evaluated query is
   `SELECT <cols> FROM <table> WHERE <key> = :param`. Other operators (IN, LIKE,
-  ranges, AND/OR) parse but are not evaluated yet.
+  ranges, AND/OR) already parse but are not evaluated under encryption yet.
+  Widening the set of operators the engine can evaluate privately is active
+  work, so expect more SQL support over time.
 - Not a way to skip work. PIR requires a full linear scan. Sharding improves
   latency and throughput, not total work.
-- Not anonymity. Authentication is access control. The operator may learn which
-  authenticated principal sent a query, never the query value.
+- Not anonymity. Authentication is access control: OpaqueDB hides the query
+  value, never who is asking. The server always learns which authenticated
+  principal sent a query. You can build anonymous authentication on top of
+  OpaqueDB (for example an anonymizing proxy, a mix layer, or anonymous
+  credentials in your application), but the database alone will not provide it.
+  Client anonymity is an extra layer you add above the database, not a property
+  it gives you.
 - It ships no client SDK. The gRPC `.proto` files are the wire contract. The
   `query` subcommand is a dev test client.
 
@@ -147,12 +173,19 @@ row under encryption and returns only the encrypted match.
 The build uses CMake with Ninja and vcpkg in manifest mode. Dependencies are
 pinned by the `builtin-baseline` in `vcpkg.json`.
 
+Common tasks run through the `Makefile`, which is the single source of truth for
+build, test, lint, and packaging commands (CI invokes the same targets):
+
 ```sh
 export VCPKG_ROOT=/opt/vcpkg   # provided by the dev container
-cmake --preset dev             # first configure builds dependencies
-cmake --build build/dev
-cd build/dev && ctest
+make configure                 # first run builds dependencies via vcpkg
+make build
+make test
 ```
+
+Run `make help` to list every target. Useful ones: `make lint` (clang-format and
+clang-tidy), `make package` (release `.deb` and `.tar.gz`), and `PRESET=release`
+on `configure`/`build` for an optimized build.
 
 The dev container in `.devcontainer/` provides the C++20 toolchain and vcpkg.
 The first configure is slow because vcpkg builds dependencies from source; later

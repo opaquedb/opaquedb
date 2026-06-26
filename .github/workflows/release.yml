@@ -2,7 +2,7 @@ name: Release
 
 # Fires when a version tag is pushed. git-flow tags releases as v<version>
 # (e.g. v0.1.0) on main when `git flow release finish` runs, so finishing a
-# release is all it takes to build and publish the binaries and the .deb.
+# release is all it takes to build, package, and publish.
 on:
   push:
     tags: ['v*.*.*']
@@ -12,15 +12,28 @@ permissions:
   contents: write
 
 jobs:
-  package:
-    name: build & package
+  release:
+    name: build & publish
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       VCPKG_ROOT: /opt/vcpkg
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-cache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+        with:
+          # Full history so release notes can diff against the previous tag.
+          fetch-depth: 0
+
+      # See ci.yml: reclaim preinstalled toolchains so the from-source vcpkg
+      # build does not fill the runner disk.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}"
+          sudo docker image prune --all --force || true
+          df -h /
 
       - name: Install toolchain
         run: |
@@ -47,15 +60,15 @@ jobs:
           restore-keys: vcpkg-release-${{ runner.os }}-
 
       - name: Configure
-        run: cmake --preset release
+        run: make configure PRESET=release
 
       - name: Build
-        run: cmake --build --preset release
+        run: make build PRESET=release
 
-      # Produces opaquedb_<version>_amd64.deb and opaquedb-<version>-Linux.tar.gz
-      # from the CPack config in CMakeLists.txt (DEB;TGZ).
+      # Produces opaquedb_<version>_<arch>.deb (full install) and
+      # opaquedb_<version>_<arch>.tar.gz (binary only) from CMake/CPack.
       - name: Package
-        run: cd build/release && cpack
+        run: make package
 
       # Guard against a tag that does not match the built binary's version.
       - name: Verify version matches tag
@@ -68,10 +81,31 @@ jobs:
             exit 1
           }
 
+      # Release notes are the commit messages since the previous tag.
+      - name: Build release notes from commits
+        id: notes
+        run: |
+          prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" \
+            2>/dev/null || true)"
+          {
+            echo "notes<<RELEASE_NOTES_EOF"
+            if [ -n "$prev" ]; then
+              echo "Changes since ${prev}:"
+              echo
+              git log --no-merges --pretty='- %s' "${prev}..${GITHUB_REF_NAME}"
+            else
+              echo "Changes:"
+              echo
+              git log --no-merges --pretty='- %s' "${GITHUB_REF_NAME}"
+            fi
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Publish release with binaries and .deb
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          name: ${{ github.ref_name }}
+          body: ${{ steps.notes.outputs.notes }}
           files: |
             build/release/*.deb
             build/release/*.tar.gz
