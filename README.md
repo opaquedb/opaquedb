@@ -7,16 +7,12 @@
 **Run SQL over encrypted data without revealing the query.**
 
 <p>
-  <a href="https://docs.opaquedb.io">
-    <img src="https://img.shields.io/badge/docs-opaquedb.io-2ea44f" alt="Documentation">
-  </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License">
   </a>
   <img src="https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white" alt="C++20">
   <img src="https://img.shields.io/badge/Microsoft_SEAL-4.x-0078D4?logo=microsoft" alt="Microsoft SEAL">
   <img src="https://img.shields.io/badge/BFV-FHE-6f42c1" alt="BFV Scheme">
-  <img src="https://img.shields.io/badge/gRPC-Enabled-2496ED?logo=grpc" alt="gRPC">
 </p>
 
 <p>
@@ -35,10 +31,6 @@
 </div>
 
 ---
-
-> **Documentation:** full guides, the SQL reference, deployment, and real-world
-> [use cases](https://docs.opaquedb.io/use-cases/) live at
-> **[docs.opaquedb.io](https://docs.opaquedb.io)**. This README is the quick tour.
 
 ## What it is
 
@@ -285,16 +277,6 @@ docker compose -f docker/docker-compose.yml run --rm tools \
 ```
 
 Any node can be the target; each coordinates the query across all shards.
-
-## Documentation
-
-The full documentation lives at **[docs.opaquedb.io](https://docs.opaquedb.io)**:
-
-- [Use cases](https://docs.opaquedb.io/use-cases/) — what OpaqueDB is good for and
-  how teams put it to work.
-- Guides, the SQL and configuration reference, and deployment notes.
-
-This README is the quick tour; the docs site is the source of truth for usage.
 
 ## References
 
