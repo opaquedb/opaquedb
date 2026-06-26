@@ -57,6 +57,24 @@ public:
       return where.status();
     stmt.where = *std::move(where);
 
+    // Optional LIMIT then optional OFFSET. Both are public bounds on how many
+    // result buckets to return and from where; they are not secret values.
+    if (Match(TokenType::kLimit)) {
+      absl::StatusOr<std::uint64_t> n = ParseCount("LIMIT");
+      if (!n.ok())
+        return n.status();
+      if (*n == 0) {
+        return absl::InvalidArgumentError("LIMIT must be at least 1");
+      }
+      stmt.limit = *n;
+    }
+    if (Match(TokenType::kOffset)) {
+      absl::StatusOr<std::uint64_t> m = ParseCount("OFFSET");
+      if (!m.ok())
+        return m.status();
+      stmt.offset = *m;
+    }
+
     if (absl::Status s = Expect(TokenType::kEnd); !s.ok()) {
       return absl::InvalidArgumentError(
           absl::StrCat("unexpected trailing input near offset ", Peek().pos));
@@ -93,6 +111,24 @@ private:
                        " at offset ", Peek().pos));
     }
     return Advance().text;
+  }
+
+  // Parses a non-negative integer count following LIMIT or OFFSET. The value is
+  // a plain number literal in the public template (not a secret), so it is read
+  // here rather than treated as a bound parameter.
+  absl::StatusOr<std::uint64_t> ParseCount(const char *what) {
+    if (!Check(TokenType::kNumberLiteral)) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("expected a number after ", what, " but found ",
+                       ToString(Peek().type), " at offset ", Peek().pos));
+    }
+    const Token &tok = Advance();
+    std::uint64_t v = 0;
+    if (!absl::SimpleAtoi(tok.text, &v)) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          what, " value '", tok.text, "' is out of range at offset ", tok.pos));
+    }
+    return v;
   }
 
   absl::StatusOr<Parameter> ParseParameter() {
@@ -275,8 +311,18 @@ absl::StatusOr<PreparedQuery> PrepareClientQuery(std::string_view sql) {
   // In the supported single-equality grammar a literal can appear only as the
   // match value, so the first literal token is the value to lift out. More than
   // one literal means a multi-predicate template, which is not evaluable yet.
+  // The number after LIMIT or OFFSET is a public bound, not the match value, so
+  // skip it.
   const Token *literal = nullptr;
+  TokenType prev = TokenType::kEnd;
   for (const Token &tok : *tokens) {
+    const TokenType cur = tok.type;
+    if ((prev == TokenType::kLimit || prev == TokenType::kOffset) &&
+        cur == TokenType::kNumberLiteral) {
+      prev = cur;
+      continue;
+    }
+    prev = cur;
     if (tok.type != TokenType::kStringLiteral &&
         tok.type != TokenType::kNumberLiteral)
       continue;
@@ -288,6 +334,8 @@ absl::StatusOr<PreparedQuery> PrepareClientQuery(std::string_view sql) {
   }
 
   PreparedQuery out;
+  out.limit = stmt->limit;
+  out.offset = stmt->offset;
   if (literal == nullptr) {
     out.sql_template = std::string(src);
     return out; // already parameterized; nothing to strip

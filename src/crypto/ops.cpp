@@ -77,10 +77,15 @@ absl::StatusOr<std::string> BuildEncryptedOperand(const CryptoContext &ctx,
       std::vector<seal::Ciphertext>{*std::move(cipher)});
 }
 
-absl::StatusOr<std::optional<std::vector<std::uint8_t>>>
-DecryptRecord(const CryptoContext &ctx, const seal::SecretKey &sk,
-              const std::string &encrypted_blob, std::uint32_t key_bits,
-              std::uint32_t record_bytes, std::uint32_t bytes_per_slot) {
+absl::StatusOr<std::vector<BucketResult>>
+DecryptResults(const CryptoContext &ctx, const seal::SecretKey &sk,
+               const std::string &encrypted_blob, std::uint32_t key_bits,
+               std::uint32_t record_bytes, std::uint32_t bytes_per_slot,
+               std::uint32_t buckets, std::uint64_t offset,
+               std::uint64_t limit) {
+  if (buckets == 0) {
+    return absl::InvalidArgumentError("buckets must be positive");
+  }
   const std::uint32_t planes =
       core::PayloadPlaneCount(record_bytes, key_bits, bytes_per_slot);
   // planes payload ciphertexts plus one trailing presence ciphertext.
@@ -94,52 +99,94 @@ DecryptRecord(const CryptoContext &ctx, const seal::SecretKey &sk,
         "result has ", ciphers->size(), " ciphertexts, expected ", expected));
   }
 
-  // Decodes a ciphertext's block 0, summing the two slot rows (the matched
-  // payload lands in block 0 of whichever row holds it; the other is zero).
-  auto block0 = [&](const seal::Ciphertext &c)
-      -> absl::StatusOr<std::vector<std::uint64_t>> {
-    absl::StatusOr<seal::Plaintext> plain = Decrypt(ctx, sk, c);
+  // Decrypt and decode every ciphertext once into slot vectors.
+  std::vector<std::vector<std::uint64_t>> slots(expected);
+  std::size_t row = 0;
+  for (std::uint32_t c = 0; c < expected; ++c) {
+    absl::StatusOr<seal::Plaintext> plain = Decrypt(ctx, sk, (*ciphers)[c]);
     if (!plain.ok())
       return plain.status();
-    absl::StatusOr<std::vector<std::uint64_t>> slots = ctx.DecodeBatch(*plain);
-    if (!slots.ok())
-      return slots.status();
-    const std::size_t row = slots->size() / 2;
-    if (row < key_bits) {
-      return absl::InternalError("decoded plane has fewer slots than key_bits");
-    }
+    absl::StatusOr<std::vector<std::uint64_t>> decoded =
+        ctx.DecodeBatch(*plain);
+    if (!decoded.ok())
+      return decoded.status();
+    slots[c] = *std::move(decoded);
+    if (c == 0)
+      row = slots[c].size() / 2;
+  }
+  if (row < key_bits) {
+    return absl::InternalError("decoded plane has fewer slots than key_bits");
+  }
+  if (row % buckets != 0) {
+    return absl::InternalError(absl::StrCat(
+        "slot row ", row, " is not divisible by buckets ", buckets));
+  }
+  const std::size_t stride = row / buckets;
+
+  // Reads one bucket's first block (key_bits slots) from a decoded ciphertext,
+  // summing the two slot rows: the matched payload lands in the bucket's block
+  // of whichever row holds it, and the other row's is zero.
+  auto bucket_block = [&](std::uint32_t cipher, std::size_t base) {
     std::vector<std::uint64_t> block(key_bits);
+    const std::vector<std::uint64_t> &s = slots[cipher];
     for (std::uint32_t i = 0; i < key_bits; ++i)
-      block[i] = (*slots)[i] + (*slots)[row + i];
+      block[i] = s[base + i] + s[row + base + i];
     return block;
   };
 
-  // Presence first: the trailing ciphertext's block-0 slot 0 is the match
-  // count.
-  absl::StatusOr<std::vector<std::uint64_t>> presence =
-      block0((*ciphers)[planes]);
-  if (!presence.ok())
-    return presence.status();
-  if ((*presence)[0] == 0) {
-    return std::nullopt; // no row matched
-  }
-
   const std::uint32_t bytes_per_plane =
       core::PayloadBytesPerBlock(key_bits, bytes_per_slot);
-  std::vector<std::uint8_t> record;
-  record.reserve(static_cast<std::size_t>(planes) * bytes_per_plane);
-  for (std::uint32_t p = 0; p < planes; ++p) {
-    absl::StatusOr<std::vector<std::uint64_t>> block = block0((*ciphers)[p]);
-    if (!block.ok())
-      return block.status();
-    absl::StatusOr<std::vector<std::uint8_t>> chunk =
-        core::UnpackSlotsToBytes(*block, bytes_per_plane, bytes_per_slot);
-    if (!chunk.ok())
-      return chunk.status();
-    record.insert(record.end(), chunk->begin(), chunk->end());
+
+  // Clamp the [offset, offset + limit) window to the bucket count without
+  // overflowing: at most `buckets - start` buckets remain after the offset.
+  const std::uint64_t start = offset < buckets ? offset : buckets;
+  const std::uint64_t remaining = buckets - start;
+  const std::uint64_t window = limit < remaining ? limit : remaining;
+  const std::uint64_t stop = start + window;
+  std::vector<BucketResult> out;
+  out.reserve(static_cast<std::size_t>(window));
+  for (std::uint64_t g = start; g < stop; ++g) {
+    const std::size_t base = static_cast<std::size_t>(g) * stride;
+    const std::vector<std::uint64_t> pres = bucket_block(planes, base);
+    BucketResult br;
+    if (pres[0] == 0) {
+      out.push_back(std::move(br)); // empty bucket
+      continue;
+    }
+    br.present = true;
+    if (pres[0] >= 2) {
+      br.collided = true; // multiple rows summed together: drop the bytes
+      out.push_back(std::move(br));
+      continue;
+    }
+    br.record.reserve(static_cast<std::size_t>(planes) * bytes_per_plane);
+    for (std::uint32_t p = 0; p < planes; ++p) {
+      const std::vector<std::uint64_t> block = bucket_block(p, base);
+      absl::StatusOr<std::vector<std::uint8_t>> chunk =
+          core::UnpackSlotsToBytes(block, bytes_per_plane, bytes_per_slot);
+      if (!chunk.ok())
+        return chunk.status();
+      br.record.insert(br.record.end(), chunk->begin(), chunk->end());
+    }
+    br.record.resize(record_bytes);
+    out.push_back(std::move(br));
   }
-  record.resize(record_bytes);
-  return record;
+  return out;
+}
+
+absl::StatusOr<std::optional<std::vector<std::uint8_t>>>
+DecryptRecord(const CryptoContext &ctx, const seal::SecretKey &sk,
+              const std::string &encrypted_blob, std::uint32_t key_bits,
+              std::uint32_t record_bytes, std::uint32_t bytes_per_slot) {
+  absl::StatusOr<std::vector<BucketResult>> results =
+      DecryptResults(ctx, sk, encrypted_blob, key_bits, record_bytes,
+                     bytes_per_slot, /*buckets=*/1, /*offset=*/0, /*limit=*/1);
+  if (!results.ok())
+    return results.status();
+  if (results->empty() || !(*results)[0].present) {
+    return std::nullopt; // no row matched
+  }
+  return (*results)[0].record;
 }
 
 } // namespace opaquedb::crypto

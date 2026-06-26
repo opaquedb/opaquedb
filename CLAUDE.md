@@ -194,10 +194,12 @@ key) is the worked example.
 (`= "London"`). A literal is the secret value, so it is client-side sugar:
 `sql::PrepareClientQuery` (in `client::QueryClient`) lifts it out, encrypts it,
 and rewrites to `:v`; the server's `BuildLogicalPlan` rejects any literal, so the
-operator only ever sees the parameterized template. There is one wire client,
-`client::QueryClient::Query(client_id, sql, value, backend_hint, database)`
-(table from SQL, db default "default"); the `query` and `repl` commands and both
-examples use it (the old `server::DevClient` was deleted). All CLI parsing is
+operator only ever sees the parameterized template. `LIMIT n` and `OFFSET m` are
+optional, public, and parsed into the plan (default `LIMIT 1`, no offset). There
+is one wire client,
+`client::QueryClient::Query(client_id, sql, value, backend_hint, database,
+collided_out)` (table from SQL, db default "default"); the `query` and `repl`
+commands and both examples use it (the old `server::DevClient` was deleted). All CLI parsing is
 CLI11; command files live under `src/cli/commands/`; shared helpers (`LoadConfig`
 for config+logging, `ReadFile`, the row renderers `RenderRaw`/`RenderWithSchema`)
 live in `src/cli/util.{h,cpp}`. `repl` registers keys once then runs each SELECT
@@ -212,18 +214,44 @@ today and single-node oriented (it does not advance a global cluster epoch, TODO
 **Crypto and matching.** Matching is bit-sliced equality. Per batch ciphertext:
 `diff = query - key` (sub_plain), `sq = diff^2` (square), `eq = 1 - sq` (per-bit
 XNOR), an AND across each record's bits by a rotate-and-multiply tree of depth
-`log2(key_bits)`, a plaintext mask to block starts, a doubling masked-broadcast
-(no plaintext multiply, so no noise spent and no cross-block bleed), then per
-payload plane a `multiply_plain` by the packed payload and a block-sum into
-block 0. The two slot rows are not merged with rotate_columns; the matched
-payload lands in block 0 of one row and the client sums the two row-0 blocks.
-Only `1 + log2(key_bits)` ct*ct multiplies per batch (depth 5 at key_bits 16),
-independent of batch size; the query is ONE ciphertext (value bit-expanded and
-tiled across all slots). `combine`/`CombinePartials` add shard partials
-plane-wise. Empty-result control: the backend appends a "presence" ciphertext
-(`sum_r b_r`, the match count); `crypto::DecryptRecord` reads it first and returns
-`nullopt` at zero, so a no-match is an encrypted empty result and the operator
-never learns whether a query matched.
+`log2(key_bits)`, a plaintext occupancy mask to occupied block starts (gates out
+empty padding blocks, which hold key 0 and would otherwise match a query for 0),
+a doubling masked-broadcast (no plaintext multiply, so no noise spent and no
+cross-block bleed), then per payload plane a `multiply_plain` by the packed
+payload and a per-bucket block-sum. The two slot rows are not merged with
+rotate_columns; the matched payload lands in a bucket of one row and the client
+sums the two rows' bucket. Only `1 + log2(key_bits)` ct*ct multiplies per batch
+(depth 5 at key_bits 16), independent of batch size; the query is ONE ciphertext
+(value bit-expanded and tiled across all slots). `combine`/`CombinePartials` add
+shard partials plane-wise. Empty-result control: the backend appends a "presence"
+ciphertext (`sum_r b_r` per bucket, the match count); the client reads it first
+and returns no record for a zero-count bucket, so a no-match is an encrypted
+empty result and the operator never learns whether a query matched.
+
+**Multi-result, LIMIT/OFFSET (`crypto.result_buckets`, default 16).** Rows are
+partitioned into `result_buckets` buckets (a power of two, at most
+`(poly/2)/key_bits`). A row that is the i-th of its key goes to bucket
+`(Mix(key)+i) % buckets` (`Mix` is a splitmix64 finalizer in the reference
+backend), so rows that SHARE a key land in distinct buckets and different keys
+spread evenly for dense packing. Collisions can only happen between same-key
+rows, and since sharding is by key all of a key's rows live on one shard, so
+placement is purely local, computed at query time, no storage change. The
+matcher stops the block-sum at the bucket width (`core::BucketStride`), leaving
+one partial sum per bucket; bucket g is read at slot `g*stride` in each row. All
+buckets share one ciphertext per plane, so the whole partition rides in one
+result blob and result size does not grow with LIMIT. The matcher ALWAYS
+partitions into `result_buckets` (the engine sets `query.result_buckets =
+result_buckets`, independent of the query's LIMIT/OFFSET); a deployment that sets
+`result_buckets = 1` opts back into single-bucket collapse (unique-key only).
+`crypto::DecryptResults` decodes every bucket, per-bucket presence telling empty
+(0) from clean (1) from collided (>=2, dropped and counted into the client's
+`collided_buckets` out-param, surfaced as a CLI warning). LIMIT/OFFSET are then
+applied CLIENT-SIDE as a row skip/take over the decoded clean rows (in bucket
+order, stable across queries), so LIMIT counts ROWS not bucket slots and OFFSET
+pages through matches; default is `LIMIT 1`, `OFFSET 0`. A key with up to
+`result_buckets` rows returns all of them in one query; raise `result_buckets`
+for more. `crypto::DecryptRecord` is the buckets=1 wrapper kept for the
+single-match callers.
 
 **FHE params and keys.** Defaults: `poly_modulus_degree=16384`,
 `coeff_modulus_bits=[60,60,60,60,60,49]` (349 bits, under the 438-bit degree-16384

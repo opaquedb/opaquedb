@@ -215,22 +215,27 @@ void ReplCommand::Register(CLI::App &parent, const GlobalOptions &globals,
           render_schema = &it->second;
       }
 
+      std::uint32_t collided = 0;
       absl::StatusOr<std::vector<std::vector<std::uint8_t>>> rows =
           (*client)->Query(client_id_, std::string(trimmed), /*value=*/0,
-                           /*backend_hint=*/"", database);
+                           /*backend_hint=*/"", database, &collided);
       if (!rows.ok()) {
         std::cout << "error: " << rows.status().message() << "\n";
         continue;
       }
       if (rows->empty()) {
         std::cout << "(no rows)\n";
-        continue;
       }
       for (const std::vector<std::uint8_t> &row : *rows) {
         std::cout << (render_schema
                           ? RenderWithSchema(*render_schema, row, projection)
                           : RenderRaw(row))
                   << "\n";
+      }
+      if (collided > 0) {
+        std::cout << "(" << collided
+                  << " bucket(s) dropped: same-key collision; raise "
+                     "crypto.result_buckets or page with OFFSET)\n";
       }
     }
   });

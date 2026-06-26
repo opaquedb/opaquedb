@@ -5,6 +5,7 @@
 #include <exception>
 #include <memory>
 #include <span>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -48,6 +49,19 @@ int Log2(std::uint32_t n) {
   while ((1u << l) < n)
     ++l;
   return l;
+}
+
+// A fixed integer mix (the splitmix64 finalizer) that spreads a key value over
+// the bucket range. Multi-match placement starts each key's rows at bucket
+// Mix(key) % buckets and walks forward, so rows that share a key land in
+// distinct buckets while different keys are spread evenly for dense packing.
+// This is plaintext, query-independent, and deterministic, so every query and
+// every shard place the same key the same way.
+std::uint64_t Mix(std::uint64_t x) {
+  x += 0x9E3779B97F4A7C15ULL;
+  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+  return x ^ (x >> 31);
 }
 
 } // namespace
@@ -132,16 +146,58 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
         "key_bits ", kb, " does not divide the slot row size ", row));
   }
   const std::size_t blocks_per_row = row / kb;
-  const std::size_t records_per_ct = 2 * blocks_per_row;
   const int levels = Log2(kb);
   const std::uint32_t bytes_per_block = core::PayloadBytesPerBlock(kb, bps);
   const std::uint32_t planes = core::PayloadPlaneCount(record_bytes, kb, bps);
 
-  // The slot offset of record j's block within a batch ciphertext. Records
-  // [0, blocks_per_row) sit in row 0, the rest in row 1, each in its own block.
-  auto block_start = [&](std::size_t j) -> std::size_t {
-    return j < blocks_per_row ? j * kb : row + (j - blocks_per_row) * kb;
-  };
+  // Result buckets. 1 is the single-match path: the block-sum runs to the end
+  // so one bucket holds the sum of every block (correct when at most one row
+  // matches). A larger power of two stops the block-sum early, leaving that
+  // many partial sums per row, and spreads rows that share a key across
+  // distinct buckets so a window of matches can be returned. It must divide the
+  // blocks in one row.
+  const std::uint32_t buckets =
+      query.result_buckets == 0 ? 1 : query.result_buckets;
+  if (!IsPowerOfTwo(buckets) ||
+      buckets > static_cast<std::uint32_t>(blocks_per_row)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("result_buckets must be a power of two in [1, ",
+                     blocks_per_row, "], got ", buckets));
+  }
+  const std::size_t seg = blocks_per_row / buckets; // blocks per bucket per row
+  const std::size_t slots_per_bucket_ct = 2 * seg;  // bucket capacity per batch
+  const std::size_t stride = core::BucketStride(static_cast<std::uint32_t>(N),
+                                                buckets); // = row/buckets
+
+  // Lay out every row into a (batch ciphertext, slot) position. A row that is
+  // the i-th of its key goes to bucket (Mix(key) + i) % buckets, then to the
+  // next free block slot inside that bucket; the first seg slots of a bucket
+  // sit in row 0 of the batch, the rest in row 1. Rows sharing a key thus land
+  // in distinct buckets (no collision until a key has more than `buckets`
+  // rows), and different keys spread evenly so packing stays dense. With
+  // buckets == 1 this is exactly the original sequential packing. The placement
+  // is grouped by batch so each batch ciphertext is assembled once.
+  std::vector<std::vector<std::pair<std::size_t, std::size_t>>> batched_rows;
+  {
+    std::unordered_map<std::uint64_t, std::uint32_t> key_seq;
+    std::vector<std::size_t> occ(buckets, 0);
+    const std::uint32_t mask = buckets - 1;
+    for (std::size_t r = 0; r < total; ++r) {
+      std::size_t g = 0;
+      if (buckets > 1) {
+        const std::uint32_t i = key_seq[keys.keys[r]]++;
+        g = (static_cast<std::uint32_t>(Mix(keys.keys[r])) + i) & mask;
+      }
+      const std::size_t o = occ[g]++;
+      const std::size_t b = o / slots_per_bucket_ct;
+      const std::size_t k = o % slots_per_bucket_ct;
+      const std::size_t blk = g * seg + (k < seg ? k : k - seg);
+      const std::size_t slot = (k < seg) ? blk * kb : row + blk * kb;
+      if (b >= batched_rows.size())
+        batched_rows.resize(b + 1);
+      batched_rows[b].emplace_back(r, slot);
+    }
+  }
 
   const seal::RelinKeys &relin = ref->keys().relin_keys;
   const seal::GaloisKeys &gal = ref->keys().galois_keys;
@@ -152,13 +208,6 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
     absl::StatusOr<seal::Plaintext> ones_pt = ctx_.EncodeBatch(ones);
     if (!ones_pt.ok())
       return ones_pt.status();
-
-    std::vector<std::uint64_t> start_mask(N, 0);
-    for (std::size_t s = 0; s < N; ++s)
-      start_mask[s] = (s % kb == 0) ? 1 : 0;
-    absl::StatusOr<seal::Plaintext> start_pt = ctx_.EncodeBatch(start_mask);
-    if (!start_pt.ok())
-      return start_pt.status();
 
     // A fresh encryption of zero, used to seed every plane's accumulator. This
     // makes each returned plane a valid (non-transparent) ciphertext even when
@@ -182,21 +231,29 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
     std::vector<seal::Ciphertext> acc(planes + 1, *zero_ct);
     const std::uint32_t presence_idx = planes;
 
-    for (std::size_t base = 0; base < total; base += records_per_ct) {
-      const std::size_t batch = std::min(records_per_ct, total - base);
-
-      // Build the key plaintext: each record's bits in its block.
+    for (const std::vector<std::pair<std::size_t, std::size_t>> &items :
+         batched_rows) {
+      // Build the key plaintext (each row's bits at its assigned slot) and the
+      // occupancy mask (a 1 at every occupied block start). The mask, not a
+      // static every-block-start mask, gates the indicator: empty block slots
+      // hold key 0, which would otherwise spuriously match a query for value 0
+      // and inflate the count, so only occupied blocks survive.
       std::vector<std::uint64_t> key_slots(N, 0);
-      for (std::size_t j = 0; j < batch; ++j) {
+      std::vector<std::uint64_t> start_mask(N, 0);
+      for (const std::pair<std::size_t, std::size_t> &item : items) {
         const std::vector<std::uint64_t> bits =
-            core::KeyToBits(keys.keys[base + j], kb);
-        const std::size_t at = block_start(j);
+            core::KeyToBits(keys.keys[item.first], kb);
+        const std::size_t at = item.second;
         for (std::uint32_t b = 0; b < kb; ++b)
           key_slots[at + b] = bits[b];
+        start_mask[at] = 1;
       }
       absl::StatusOr<seal::Plaintext> key_pt = ctx_.EncodeBatch(key_slots);
       if (!key_pt.ok())
         return key_pt.status();
+      absl::StatusOr<seal::Plaintext> start_pt = ctx_.EncodeBatch(start_mask);
+      if (!start_pt.ok())
+        return start_pt.status();
 
       // sel = 1 - (query - key)^2, AND-reduced across each block.
       seal::Ciphertext sel = query.query;
@@ -211,11 +268,11 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
         evaluator_->multiply_inplace(sel, rot);
         evaluator_->relinearize_inplace(sel, relin);
       }
-      // Keep the indicator at block starts, then broadcast it across each block
-      // by a doubling prefix-sum. The window grows to exactly key_bits wide,
-      // and block starts are key_bits apart, so each slot's window holds
-      // exactly one start: no cross-block bleed, and no plaintext multiplies to
-      // spend noise.
+      // Keep the indicator at occupied block starts, then broadcast it across
+      // each block by a doubling prefix-sum. The window grows to exactly
+      // key_bits wide, and block starts are key_bits apart, so each slot's
+      // window holds exactly one start: no cross-block bleed, and no plaintext
+      // multiplies to spend noise.
       evaluator_->multiply_plain_inplace(sel, *start_pt);
       for (int i = 0; i < levels; ++i) {
         seal::Ciphertext rot;
@@ -224,13 +281,13 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
       }
 
       for (std::uint32_t p = 0; p < planes; ++p) {
-        // Pack plane p of each record's payload into its block.
+        // Pack plane p of each row's payload into its assigned block.
         std::vector<std::uint64_t> pay_slots(N, 0);
         const std::uint32_t lo = p * bytes_per_block;
         const std::uint32_t hi =
             std::min(record_bytes, (p + 1) * bytes_per_block);
-        for (std::size_t j = 0; j < batch; ++j) {
-          const std::vector<std::uint8_t> &rec = payload.rows[base + j];
+        for (const std::pair<std::size_t, std::size_t> &item : items) {
+          const std::vector<std::uint8_t> &rec = payload.rows[item.first];
           if (lo >= rec.size())
             continue;
           const std::uint32_t end = std::min<std::uint32_t>(
@@ -241,7 +298,7 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
                   bps);
           if (!packed.ok())
             return packed.status();
-          const std::size_t at = block_start(j);
+          const std::size_t at = item.second;
           for (std::size_t s = 0; s < packed->size(); ++s)
             pay_slots[at + s] = (*packed)[s];
         }
@@ -263,11 +320,13 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
 
         seal::Ciphertext out = sel;
         evaluator_->multiply_plain_inplace(out, *pay_pt);
-        // Sum every block within a row into that row's block 0. We do not
-        // rotate columns to merge the two rows (that would need an extra Galois
-        // key); the matched payload lands in block 0 of whichever row holds it,
-        // and the client sums the two row-0 blocks (only one is nonzero).
-        for (std::size_t step = kb; step < row; step <<= 1) {
+        // Sum the blocks within each bucket into the bucket's first block. The
+        // doubling sum stops at the bucket width (stride): with buckets == 1
+        // that is the whole row (every block folds into block 0); with more
+        // buckets it leaves one partial sum per bucket, spaced stride apart. We
+        // do not rotate columns to merge the two rows; the client sums the two
+        // rows' bucket g (only one side is nonzero per matched row).
+        for (std::size_t step = kb; step < stride; step <<= 1) {
           seal::Ciphertext rot;
           evaluator_->rotate_rows(out, static_cast<int>(step), gal, rot);
           evaluator_->add_inplace(out, rot);
@@ -275,10 +334,11 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
         evaluator_->add_inplace(acc[p], out);
       }
 
-      // Presence: block-sum the broadcast indicator so block 0 holds sum_r b_r
-      // for this batch. No plaintext multiply, so this never goes transparent.
+      // Presence: the same per-bucket sum of the broadcast indicator, so each
+      // bucket's first block holds the number of rows matching in that bucket.
+      // No plaintext multiply, so this never goes transparent.
       seal::Ciphertext pres = sel;
-      for (std::size_t step = kb; step < row; step <<= 1) {
+      for (std::size_t step = kb; step < stride; step <<= 1) {
         seal::Ciphertext rot;
         evaluator_->rotate_rows(pres, static_cast<int>(step), gal, rot);
         evaluator_->add_inplace(pres, rot);

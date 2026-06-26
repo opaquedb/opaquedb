@@ -107,8 +107,10 @@ void QueryCommand::Register(CLI::App &parent, const GlobalOptions &globals,
       }
     }
 
+    std::uint32_t collided = 0;
     absl::StatusOr<std::vector<std::vector<std::uint8_t>>> rows =
-        (*client)->Query(client_id_, sql_, value_, backend_, database_);
+        (*client)->Query(client_id_, sql_, value_, backend_, database_,
+                         &collided);
     if (!rows.ok()) {
       spdlog::error("query: {}", rows.status().message());
       exit_code = 1;
@@ -116,12 +118,17 @@ void QueryCommand::Register(CLI::App &parent, const GlobalOptions &globals,
     }
     if (rows->empty()) {
       std::cout << "(no rows)\n";
-      return;
     }
     for (const std::vector<std::uint8_t> &row : *rows) {
       std::cout << (have_schema ? RenderWithSchema(schema, row, projection)
                                 : RenderRaw(row))
                 << "\n";
+    }
+    if (collided > 0) {
+      spdlog::warn("{} result bucket(s) dropped: multiple rows with the same "
+                   "key collided; raise crypto.result_buckets or page with "
+                   "OFFSET to recover them",
+                   collided);
     }
   });
 }

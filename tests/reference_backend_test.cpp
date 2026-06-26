@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -110,7 +111,43 @@ struct Fixture {
     EXPECT_TRUE(rec.ok()) << rec.status().message();
     return *rec;
   }
+
+  // Builds the query operand for a multi-bucket (LIMIT/OFFSET) retrieve.
+  EncryptedQuery BuildQuery(std::uint64_t value, std::uint32_t buckets) const {
+    EncryptedQuery q = BuildQuery(value);
+    q.result_buckets = buckets;
+    return q;
+  }
+
+  // The clean records and the collided-bucket count from a window of buckets.
+  struct Decoded {
+    std::vector<std::vector<std::uint8_t>> rows;
+    std::uint32_t collided = 0;
+  };
+  Decoded DecodeBuckets(const std::vector<seal::Ciphertext> &planes,
+                        std::uint32_t buckets, std::uint64_t offset,
+                        std::uint64_t limit) const {
+    std::string blob = opaquedb::crypto::SerializeCiphertexts(planes);
+    auto recs = opaquedb::crypto::DecryptResults(
+        ctx, keyring.secret_key(), blob, kKeyBits, kRecordBytes, kBytesPerSlot,
+        buckets, offset, limit);
+    EXPECT_TRUE(recs.ok()) << recs.status().message();
+    Decoded d;
+    for (const auto &br : *recs) {
+      if (br.collided)
+        ++d.collided;
+      else if (br.present)
+        d.rows.push_back(br.record);
+    }
+    return d;
+  }
 };
+
+// Sorts a record list so two retrieval results can be compared as sets (bucket
+// order is a hash, not the storage order).
+void SortRows(std::vector<std::vector<std::uint8_t>> &rows) {
+  std::sort(rows.begin(), rows.end());
+}
 
 std::unique_ptr<PirBackend> MakeBackend(const CryptoContext &ctx) {
   EXPECT_TRUE(opaquedb::backend::reference::LinkReferenceBackend());
@@ -223,6 +260,122 @@ TEST(ReferenceBackend, CombineSumsAcrossShards) {
   std::optional<std::vector<std::uint8_t>> got = fx.DecodeResult(*combined);
   ASSERT_TRUE(got.has_value());
   EXPECT_EQ(*got, MakePayload(42, 0)) << "matching shard-B row 0";
+}
+
+TEST(ReferenceBackend, MultiBucketReturnsAllRowsSharingAKey) {
+  // Three rows share key 42; with four buckets they spread to distinct buckets
+  // and all come back, none colliding.
+  Fixture fx = Fixture::Make();
+  std::unique_ptr<PirBackend> backend = MakeBackend(fx.ctx);
+  auto material = fx.keyring.SerializePublic();
+  ASSERT_TRUE(material.ok());
+  auto eval = backend->load_keys(*material);
+  ASSERT_TRUE(eval.ok());
+
+  std::vector<std::uint64_t> ks = {42, 7, 42, 99, 42};
+  KeyColumn keys = fx.BuildKeys(ks);
+  PayloadColumns payload = fx.BuildPayload(ks);
+  const std::uint32_t buckets = 4;
+
+  EncryptedQuery query = fx.BuildQuery(42, buckets);
+  auto partials = backend->evaluate(**eval, query, keys, payload);
+  ASSERT_TRUE(partials.ok()) << partials.status().message();
+  std::vector<std::vector<seal::Ciphertext>> shards = {*partials};
+  auto combined = backend->combine(**eval, shards);
+  ASSERT_TRUE(combined.ok()) << combined.status().message();
+
+  Fixture::Decoded d = fx.DecodeBuckets(*combined, buckets, /*offset=*/0,
+                                        /*limit=*/buckets);
+  EXPECT_EQ(d.collided, 0u);
+  std::vector<std::vector<std::uint8_t>> want = {
+      MakePayload(42, 0), MakePayload(42, 2), MakePayload(42, 4)};
+  SortRows(want);
+  SortRows(d.rows);
+  EXPECT_EQ(d.rows, want) << "all rows with key 42 should be returned";
+}
+
+TEST(ReferenceBackend, OffsetPagesThroughBucketsWithoutLossOrDuplication) {
+  // Paging the bucket window in halves returns each matching row exactly once,
+  // and the union equals the full-window result.
+  Fixture fx = Fixture::Make();
+  std::unique_ptr<PirBackend> backend = MakeBackend(fx.ctx);
+  auto material = fx.keyring.SerializePublic();
+  ASSERT_TRUE(material.ok());
+  auto eval = backend->load_keys(*material);
+  ASSERT_TRUE(eval.ok());
+
+  std::vector<std::uint64_t> ks = {42, 42, 42, 42};
+  KeyColumn keys = fx.BuildKeys(ks);
+  PayloadColumns payload = fx.BuildPayload(ks);
+  const std::uint32_t buckets = 4;
+
+  EncryptedQuery query = fx.BuildQuery(42, buckets);
+  auto partials = backend->evaluate(**eval, query, keys, payload);
+  ASSERT_TRUE(partials.ok()) << partials.status().message();
+
+  Fixture::Decoded full = fx.DecodeBuckets(*partials, buckets, 0, buckets);
+  EXPECT_EQ(full.collided, 0u);
+  EXPECT_EQ(full.rows.size(), 4u);
+
+  Fixture::Decoded page0 = fx.DecodeBuckets(*partials, buckets, 0, 2);
+  Fixture::Decoded page1 = fx.DecodeBuckets(*partials, buckets, 2, 2);
+  std::vector<std::vector<std::uint8_t>> paged = page0.rows;
+  paged.insert(paged.end(), page1.rows.begin(), page1.rows.end());
+  SortRows(paged);
+  SortRows(full.rows);
+  EXPECT_EQ(paged, full.rows) << "paging by OFFSET must cover all rows once";
+}
+
+TEST(ReferenceBackend, MoreDuplicatesThanBucketsCollideAndAreReported) {
+  // Five rows share key 42 but there are only four buckets, so at least one
+  // bucket must hold two rows and be reported as collided (dropped), not
+  // returned as garbage.
+  Fixture fx = Fixture::Make();
+  std::unique_ptr<PirBackend> backend = MakeBackend(fx.ctx);
+  auto material = fx.keyring.SerializePublic();
+  ASSERT_TRUE(material.ok());
+  auto eval = backend->load_keys(*material);
+  ASSERT_TRUE(eval.ok());
+
+  std::vector<std::uint64_t> ks = {42, 42, 42, 42, 42};
+  KeyColumn keys = fx.BuildKeys(ks);
+  PayloadColumns payload = fx.BuildPayload(ks);
+  const std::uint32_t buckets = 4;
+
+  EncryptedQuery query = fx.BuildQuery(42, buckets);
+  auto partials = backend->evaluate(**eval, query, keys, payload);
+  ASSERT_TRUE(partials.ok()) << partials.status().message();
+
+  Fixture::Decoded d = fx.DecodeBuckets(*partials, buckets, 0, buckets);
+  EXPECT_GE(d.collided, 1u) << "a bucket with two rows must be reported";
+  EXPECT_EQ(d.rows.size() + d.collided * 2, 5u)
+      << "every matching row is either returned clean or in a collided pair";
+}
+
+TEST(ReferenceBackend, MultiBucketQueryForZeroValueIgnoresEmptyBlocks) {
+  // Empty (padding) blocks hold key 0. A query for value 0 must not treat them
+  // as matches: the occupancy mask gates them out. Only the real key-0 row
+  // returns.
+  Fixture fx = Fixture::Make();
+  std::unique_ptr<PirBackend> backend = MakeBackend(fx.ctx);
+  auto material = fx.keyring.SerializePublic();
+  ASSERT_TRUE(material.ok());
+  auto eval = backend->load_keys(*material);
+  ASSERT_TRUE(eval.ok());
+
+  std::vector<std::uint64_t> ks = {0, 17, 42};
+  KeyColumn keys = fx.BuildKeys(ks);
+  PayloadColumns payload = fx.BuildPayload(ks);
+  const std::uint32_t buckets = 4;
+
+  EncryptedQuery query = fx.BuildQuery(0, buckets);
+  auto partials = backend->evaluate(**eval, query, keys, payload);
+  ASSERT_TRUE(partials.ok()) << partials.status().message();
+
+  Fixture::Decoded d = fx.DecodeBuckets(*partials, buckets, 0, buckets);
+  EXPECT_EQ(d.collided, 0u);
+  ASSERT_EQ(d.rows.size(), 1u) << "only the real key-0 row matches";
+  EXPECT_EQ(d.rows[0], MakePayload(0, 0));
 }
 
 } // namespace

@@ -38,6 +38,12 @@ public:
 struct EncryptedQuery {
   Op op = Op::kEq;
   seal::Ciphertext query;
+  // How many result buckets to partition matches into. 1 (the default) is the
+  // single-match path: all matching rows collapse into one bucket. A value > 1
+  // spreads rows that share a key across distinct buckets so a LIMIT/OFFSET
+  // window can return several of them. Must be a power of two and fit the slot
+  // geometry; the engine sets it from the resolved query window and config.
+  std::uint32_t result_buckets = 1;
 };
 
 // The column the predicate matches against, one segment's worth of rows. Held

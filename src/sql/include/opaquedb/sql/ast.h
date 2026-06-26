@@ -1,6 +1,7 @@
 #ifndef OPAQUEDB_SQL_AST_H_
 #define OPAQUEDB_SQL_AST_H_
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -187,11 +188,18 @@ private:
 
 // A parsed SELECT statement. When select_all is true (SELECT *), projection is
 // empty and means every column; the planner expands it against the schema.
+//
+// limit and offset are the optional LIMIT/OFFSET clause. They are public (part
+// of the template), not secret. Unset limit means the default of 1, the
+// single-match behavior. offset counts result buckets, not rows: see the
+// bucketed multi-result design in the reference backend.
 struct SelectStatement {
   std::vector<std::string> projection; // columns to return, in order
   bool select_all = false;             // SELECT *
   std::string table;
   std::unique_ptr<Predicate> where;
+  std::optional<std::uint64_t> limit;  // LIMIT n; unset means default 1
+  std::optional<std::uint64_t> offset; // OFFSET m; unset means 0
 };
 
 } // namespace opaquedb::sql

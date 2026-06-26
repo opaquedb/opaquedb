@@ -1,7 +1,9 @@
 #ifndef OPAQUEDB_CRYPTO_OPS_H_
 #define OPAQUEDB_CRYPTO_OPS_H_
 
+#include <cstdint>
 #include <optional>
+#include <vector>
 
 #include "absl/status/statusor.h"
 #include "opaquedb/crypto/context.h"
@@ -55,6 +57,29 @@ absl::StatusOr<std::optional<std::vector<std::uint8_t>>>
 DecryptRecord(const CryptoContext &ctx, const seal::SecretKey &sk,
               const std::string &encrypted_blob, std::uint32_t key_bits,
               std::uint32_t record_bytes, std::uint32_t bytes_per_slot);
+
+// One decoded result bucket from a multi-match query.
+struct BucketResult {
+  bool present = false;  // a row matched in this bucket
+  bool collided = false; // more than one row matched, so the bytes are garbage
+  std::vector<std::uint8_t> record; // valid only when present and not collided
+};
+
+// Decrypts a multi-bucket result. The matcher partitioned matches into
+// `buckets` buckets; this reads the window [offset, offset + limit) of them
+// (clamped to the bucket count) and returns one BucketResult per bucket in that
+// window, in bucket order. Each bucket carries its own presence count: zero
+// means the bucket is empty (present = false), one means a clean match, and two
+// or more means rows collided in that bucket (collided = true, bytes dropped).
+// For the single-match path call with buckets = 1, offset = 0, limit = 1; that
+// bucket holds the sum of every block, matching the original DecryptRecord
+// behavior.
+absl::StatusOr<std::vector<BucketResult>>
+DecryptResults(const CryptoContext &ctx, const seal::SecretKey &sk,
+               const std::string &encrypted_blob, std::uint32_t key_bits,
+               std::uint32_t record_bytes, std::uint32_t bytes_per_slot,
+               std::uint32_t buckets, std::uint64_t offset,
+               std::uint64_t limit);
 
 } // namespace opaquedb::crypto
 

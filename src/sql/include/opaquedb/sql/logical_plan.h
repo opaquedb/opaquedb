@@ -1,6 +1,8 @@
 #ifndef OPAQUEDB_SQL_LOGICAL_PLAN_H_
 #define OPAQUEDB_SQL_LOGICAL_PLAN_H_
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,6 +29,11 @@ struct LogicalPlan {
   std::string match_column;
   CompareOp op = CompareOp::kEq;
   std::string parameter; // the bound parameter name for the match value
+  // Public result window. Unset limit means the default of 1 (single match);
+  // offset counts result buckets. The engine resolves these into a bucket count
+  // and a window against the configured result_buckets.
+  std::optional<std::uint64_t> limit;
+  std::optional<std::uint64_t> offset;
 };
 
 // Assembles a LogicalPlan field by field and validates it on Build. Used by the
@@ -39,6 +46,8 @@ public:
   LogicalPlanBuilder &SetSelectAll();
   LogicalPlanBuilder &SetMatch(std::string column, CompareOp op,
                                std::string parameter);
+  LogicalPlanBuilder &SetLimit(std::uint64_t limit);
+  LogicalPlanBuilder &SetOffset(std::uint64_t offset);
 
   absl::StatusOr<LogicalPlan> Build() const;
 

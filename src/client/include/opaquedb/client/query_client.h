@@ -41,15 +41,20 @@ public:
   absl::StatusOr<core::Schema> DescribeTable(const std::string &database,
                                              const std::string &table);
 
-  // Execute a private query. Returns the decrypted record bytes for matches
-  // (usually 0 or 1 row today). The table comes from the SQL; database selects
-  // which database holds it (default "default"). value is the bound match value
-  // when the SQL uses a parameter; if the SQL carries an inline literal, value
-  // is ignored.
+  // Execute a private query. Returns the decrypted record bytes for the matched
+  // rows: one row by default, or up to LIMIT rows (from a window of result
+  // buckets) when the SQL carries a LIMIT/OFFSET. The table comes from the SQL;
+  // database selects which database holds it (default "default"). value is the
+  // bound match value when the SQL uses a parameter; if the SQL carries an
+  // inline literal, value is ignored. If collided_buckets is non-null it
+  // receives the number of result buckets dropped because more than one row
+  // with the same key hashed into them (raise crypto.result_buckets or page
+  // with OFFSET to recover those rows).
   absl::StatusOr<std::vector<std::vector<std::uint8_t>>>
   Query(const std::string &client_id, const std::string &sql_template,
         std::uint64_t value, const std::string &backend_hint = "",
-        const std::string &database = "default");
+        const std::string &database = "default",
+        std::uint32_t *collided_buckets = nullptr);
 
   // The outcome of an insert: the new epoch version and total row count.
   struct InsertResult {
