@@ -20,7 +20,7 @@ jobs:
       VCPKG_ROOT: /opt/vcpkg
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-cache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Full history so release notes can diff against the previous tag.
           fetch-depth: 0

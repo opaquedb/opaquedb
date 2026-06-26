@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install clang-format
         run: |
@@ -49,7 +49,7 @@ jobs:
       # Cache vcpkg build artifacts between runs.
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-cache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # GitHub runners ship with ~14 GB free, but vcpkg builds boost, gRPC,
       # protobuf, SEAL, and etcd from source. Reclaim ~25-30 GB of preinstalled
