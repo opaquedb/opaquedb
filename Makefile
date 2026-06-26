@@ -44,8 +44,9 @@ tidy: ## Run clang-tidy against the dev build
 
 lint: format-check tidy ## Run all style and static-analysis checks
 
-package: ## Produce the .deb and .tar.gz from an existing release build
+package: ## Produce the .deb (full) and binary-only .tar.gz from a release build
 	cd build/release && cpack
+	cmake --build build/release --target tarball
 
 release: ## Full release build, then package (.deb + .tar.gz)
 	$(MAKE) configure PRESET=release

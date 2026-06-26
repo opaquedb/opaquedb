@@ -98,9 +98,9 @@ install(FILES packaging/opaquedb.service
 install(FILES ${CMAKE_BINARY_DIR}/opaquedb.toml.example
         DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
-# CPack: build a .deb and a plain .tar.gz from the installed tree. Run from a
-# release build: `cmake --preset release && cmake --build build/release &&
-# (cd build/release && cpack)`.
+# CPack builds the .deb (the full install tree: binary, systemd unit, example
+# config). Run from a release build: `cmake --preset release && cmake --build
+# build/release && (cd build/release && cpack)`.
 set(CPACK_PACKAGE_NAME "opaquedb")
 set(CPACK_PACKAGE_VENDOR "OpaqueDB")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
@@ -108,13 +108,36 @@ set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
     "Distributed PIR database answering SQL-like queries over encrypted data")
 set(CPACK_PACKAGE_CONTACT "halptekin@schubergphilis.com")
 set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
-set(CPACK_GENERATOR "DEB;TGZ")
+set(CPACK_GENERATOR "DEB")
 set(CPACK_DEBIAN_PACKAGE_SECTION "database")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA
     "${CMAKE_CURRENT_SOURCE_DIR}/packaging/postinst;${CMAKE_CURRENT_SOURCE_DIR}/packaging/prerm;${CMAKE_CURRENT_SOURCE_DIR}/packaging/postrm")
 include(CPack)
+
+# Binary-only release tarball, named to match the .deb (Debian style:
+# opaquedb_<version>_<arch>.tar.gz). The .deb carries the systemd unit and
+# example config; this tarball is just the bare binary for a drop-in install.
+# Architecture token comes from dpkg so it matches the .deb exactly (amd64),
+# falling back to the CMake processor name off Debian.
+find_program(DPKG_EXECUTABLE dpkg)
+if(DPKG_EXECUTABLE)
+  execute_process(COMMAND ${DPKG_EXECUTABLE} --print-architecture
+                  OUTPUT_VARIABLE OPAQUEDB_PKG_ARCH
+                  OUTPUT_STRIP_TRAILING_WHITESPACE)
+else()
+  set(OPAQUEDB_PKG_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
+endif()
+set(OPAQUEDB_TARBALL_NAME
+    "opaquedb_${PROJECT_VERSION}_${OPAQUEDB_PKG_ARCH}.tar.gz")
+add_custom_target(tarball
+  COMMAND ${CMAKE_COMMAND} -E tar czf
+          "${CMAKE_BINARY_DIR}/${OPAQUEDB_TARBALL_NAME}" opaquedb
+  WORKING_DIRECTORY "$<TARGET_FILE_DIR:opaquedb>"
+  DEPENDS opaquedb
+  VERBATIM
+  COMMENT "Packaging ${OPAQUEDB_TARBALL_NAME} (binary only)")
 
 if(OPAQUEDB_BUILD_TESTS)
   enable_testing()
