@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.24)
 # it into the binary so `opaquedb --version` matches the package version. Until
 # then this literal is the single source of truth.
 project(OpaqueDB
-  VERSION 0.1.0
+  VERSION 0.2.0
   DESCRIPTION "Distributed PIR database engine over homomorphically encrypted data"
   LANGUAGES CXX)
 
