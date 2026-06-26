@@ -147,26 +147,33 @@ int main() {
 
   const std::uint32_t bps = cfg.crypto.BytesPerSlot();
   for (const auto &blob : res->encrypted_results) {
-    auto bytes = opaquedb::crypto::DecryptRecord(*client_ctx, kr.secret_key(),
-                                                 blob, cfg.crypto.key_bits,
-                                                 cfg.storage.record_bytes, bps);
-    if (!bytes.ok()) {
-      std::cerr << "decrypt: " << bytes.status().message() << "\n";
+    // The engine partitions matches into result_buckets buckets; decode them
+    // all and print each clean matched row.
+    auto recs = opaquedb::crypto::DecryptResults(
+        *client_ctx, kr.secret_key(), blob, cfg.crypto.key_bits,
+        cfg.storage.record_bytes, bps, cfg.crypto.result_buckets, /*offset=*/0,
+        /*limit=*/cfg.crypto.result_buckets);
+    if (!recs.ok()) {
+      std::cerr << "decrypt: " << recs.status().message() << "\n";
       return 1;
     }
-    if (!bytes->has_value()) {
+    bool any = false;
+    for (const opaquedb::crypto::BucketResult &br : *recs) {
+      if (!br.present || br.collided)
+        continue;
+      any = true;
+      auto values = opaquedb::core::DecodeRecord(*schema, br.record);
+      if (!values.ok()) {
+        std::cerr << "decode: " << values.status().message() << "\n";
+        return 1;
+      }
+      std::cout << want_city << " ->";
+      for (const Value &v : *values)
+        std::cout << " " << opaquedb::core::ValueToString(v);
+      std::cout << "\n";
+    }
+    if (!any)
       std::cout << want_city << " -> no match\n";
-      continue;
-    }
-    auto values = opaquedb::core::DecodeRecord(*schema, **bytes);
-    if (!values.ok()) {
-      std::cerr << "decode: " << values.status().message() << "\n";
-      return 1;
-    }
-    std::cout << want_city << " ->";
-    for (const Value &v : *values)
-      std::cout << " " << opaquedb::core::ValueToString(v);
-    std::cout << "\n";
   }
 
   fs::remove_all(tmp, ec);

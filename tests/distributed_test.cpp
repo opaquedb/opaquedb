@@ -107,13 +107,20 @@ protected:
 
   std::string DecodeResult(const CryptoContext &ctx, const ClientKeyring &keys,
                            const std::string &blob) {
-    auto bytes = opaquedb::crypto::DecryptRecord(
+    // The engine partitions matches into result_buckets buckets, so decode the
+    // whole partition (as the real client does) and return the one clean row.
+    // These tests use unique keys, so there is at most one match.
+    auto recs = opaquedb::crypto::DecryptResults(
         ctx, keys.secret_key(), blob, cfg_a_.crypto.key_bits,
-        cfg_a_.storage.record_bytes, cfg_a_.crypto.BytesPerSlot());
-    EXPECT_TRUE(bytes.ok()) << bytes.status().message();
-    if (!bytes->has_value())
-      return "";
-    return TextOf(KvSchema(), **bytes);
+        cfg_a_.storage.record_bytes, cfg_a_.crypto.BytesPerSlot(),
+        cfg_a_.crypto.result_buckets, /*offset=*/0,
+        /*limit=*/cfg_a_.crypto.result_buckets);
+    EXPECT_TRUE(recs.ok()) << recs.status().message();
+    for (const opaquedb::crypto::BucketResult &br : *recs) {
+      if (br.present && !br.collided)
+        return TextOf(KvSchema(), br.record);
+    }
+    return "";
   }
 
   Config cfg_a_;
