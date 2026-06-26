@@ -36,6 +36,7 @@ enum class TokenType {
   kCreate,
   kTable,
   kKey,
+  kIndex,
   kIdentifier,
   kParameter,     // ':name', text holds the name without the colon
   kStringLiteral, // 'text', for rejection where a value is expected

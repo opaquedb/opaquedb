@@ -11,8 +11,10 @@
 #include "opaquedb/core/schema.h"
 
 // The typed payload record: how a row's non-key columns are packed into the
-// fixed-size record bytes that storage holds and the client reads back. The
-// layout follows the schema's payload (RAW) columns in order:
+// fixed-size record bytes that storage holds and the client reads back. Every
+// column except the primary key (kEq) is payload, so a secondary index (kIndex)
+// is stored here too and is therefore returnable. The layout follows those
+// columns in schema order:
 //   int  -> 8 bytes, little-endian signed
 //   real -> 8 bytes, little-endian IEEE-754 double
 //   text -> 2-byte little-endian length, then that many bytes
@@ -44,6 +46,16 @@ EncodeRecord(const Schema &schema, const std::vector<Value> &payload,
 // length is checked against the available bytes before it is read.
 absl::StatusOr<std::vector<Value>>
 DecodeRecord(const Schema &schema, std::span<const std::uint8_t> record);
+
+// Packs the match record: one key per searchable column (kEq and every kIndex)
+// in schema order, each EncodeKeyValue'd then packed into ceil(key_bits/8)
+// bytes. key_value is the primary key column's value; payload holds the
+// remaining columns' values in schema order (the same vector EncodeRecord
+// takes), from which the index columns' values are read. The engine slices one
+// sub-key out of this record at query time by the column's SearchableRank.
+absl::StatusOr<std::vector<std::uint8_t>>
+EncodeMatchRecord(const Schema &schema, const Value &key_value,
+                  const std::vector<Value> &payload, std::uint32_t key_bits);
 
 } // namespace opaquedb::core
 

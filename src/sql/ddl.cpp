@@ -106,6 +106,8 @@ private:
     column.type = *type;
     if (Match(TokenType::kKey)) {
       column.encoding = core::ColumnEncoding::kEq;
+    } else if (Match(TokenType::kIndex)) {
+      column.encoding = core::ColumnEncoding::kIndex;
     } else {
       column.encoding = core::ColumnEncoding::kRaw;
     }

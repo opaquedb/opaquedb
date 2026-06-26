@@ -1,8 +1,8 @@
 CREATE TABLE weather (
-  city TEXT KEY,
-  id INT,
-  country TEXT,
+  id INT KEY,
+  city TEXT INDEX,
+  country TEXT INDEX,
   temperature INT,
   humidity INT,
-  conditions TEXT
+  conditions TEXT INDEX
 );

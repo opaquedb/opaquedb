@@ -46,6 +46,8 @@ TokenType KeywordOrIdentifier(std::string_view word) {
     return TokenType::kTable;
   if (upper == "KEY")
     return TokenType::kKey;
+  if (upper == "INDEX")
+    return TokenType::kIndex;
   return TokenType::kIdentifier;
 }
 
@@ -243,6 +245,8 @@ std::string ToString(TokenType type) {
     return "TABLE";
   case TokenType::kKey:
     return "KEY";
+  case TokenType::kIndex:
+    return "INDEX";
   case TokenType::kIdentifier:
     return "identifier";
   case TokenType::kParameter:

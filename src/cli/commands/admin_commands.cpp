@@ -110,11 +110,13 @@ void SchemaCommand::Register(CLI::App &parent, const GlobalOptions &globals,
     }
     std::cout << "table: " << s->table() << "\n";
     for (const core::Column &column : s->columns()) {
+      const char *role = "";
+      if (column.encoding == core::ColumnEncoding::kEq)
+        role = " (key)";
+      else if (column.encoding == core::ColumnEncoding::kIndex)
+        role = " (index)";
       std::cout << "  " << column.name << " " << core::ToString(column.type)
-                << " " << core::ToString(column.encoding)
-                << (column.encoding == core::ColumnEncoding::kEq ? " (key)"
-                                                                 : "")
-                << "\n";
+                << " " << core::ToString(column.encoding) << role << "\n";
     }
   });
 }

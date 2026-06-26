@@ -112,9 +112,15 @@ absl::Status EpochManifest::Validate() const {
         absl::StrCat("manifest match rows ", match_segment.record_count,
                      " != payload rows ", payload_segment.record_count));
   }
-  if (match_segment.record_bytes != MatchRecordBytes(key_bits)) {
+  // One packed key per searchable column (the primary key plus every secondary
+  // index). A single-key table has one searchable column, so the stride is the
+  // same as before.
+  const std::uint32_t expected_match_bytes =
+      static_cast<std::uint32_t>(schema.SearchableCount()) *
+      MatchRecordBytes(key_bits);
+  if (match_segment.record_bytes != expected_match_bytes) {
     return absl::InvalidArgumentError(
-        "manifest match segment stride does not match key_bits");
+        "manifest match segment stride does not match the searchable columns");
   }
   if (payload_segment.record_bytes != geometry.record_bytes) {
     return absl::InvalidArgumentError(

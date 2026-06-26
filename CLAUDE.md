@@ -176,19 +176,35 @@ dashes. No marketing words. Comments explain why, not what an obvious line does.
 
 ## Notes worth remembering
 
-**Data model and codecs.** Schemas: `CREATE TABLE name (col TYPE [KEY], ...)`,
-types INT/REAL/TEXT, exactly one match `KEY` (INT or TEXT, not REAL; no `--`
-comments). `core::EncodeKeyValue` is the single mapping of a key into the
-`2^key_bits` universe: INT maps directly (range-checked), TEXT hashes via
-deterministic FNV, so a TEXT match is a candidate (collisions possible but
-unlikely; larger key_bits lowers the rate; client-side verification is a tracked
-TODO). The matcher bit-expands the key into `key_bits` SIMD slots
-(`core::KeyToBits`); storage holds the raw key packed into `ceil(key_bits/8)`
-bytes (`core::PackKey`). Payload columns are returned, not matched;
+**Data model and codecs.** Schemas: `CREATE TABLE name (col TYPE [KEY|INDEX],
+...)`, types INT/REAL/TEXT, exactly one match `KEY` (INT or TEXT, not REAL; no
+`--` comments). A column may instead be marked `INDEX`: a secondary searchable
+column (a secondary index). `core::ColumnEncoding` carries the role: `kEq` is the
+one primary key (matched, shards the data, NOT stored in payload), `kIndex` is a
+secondary index (matched like the key AND stored in payload so it is
+returnable), `kRaw` is payload only. `core::IsSearchable` (kEq or kIndex) is the
+single predicate deciding which columns get a match sub-key.
+`core::EncodeKeyValue` is the single mapping of a value into the `2^key_bits`
+universe: INT maps directly (range-checked), TEXT hashes via deterministic FNV,
+so a TEXT match is a candidate (collisions possible but unlikely; larger key_bits
+lowers the rate; client-side verification is a tracked TODO). The matcher
+bit-expands one key into `key_bits` SIMD slots (`core::KeyToBits`). Storage packs
+ALL searchable columns' keys side-by-side in one `match.seg` record
+(`core::EncodeMatchRecord`): `SearchableCount() * ceil(key_bits/8)` bytes/row, in
+schema order. A single-key table has one searchable column, so the record is
+byte-identical to before. At query time the engine slices out the queried
+column's sub-key by its `Schema::SearchableRank`, so the matcher stays single-key
+and there is no crypto/depth change for a secondary-index query. Payload columns
+(everything except `kEq`, so kRaw and every kIndex) are returned, not matched;
 `core::record_codec` packs them (int/real 8 bytes, text 2-byte length + bytes) at
-ingest and decodes on the client. `load --schema f.sql --csv f.csv [--database
-D]` ingests (CSV header names columns); `examples/weather.{sql,csv}` (city TEXT
-key) is the worked example.
+ingest and decodes on the client. The primary key itself is not in payload, so it
+is not projectable. `load --schema f.sql --csv f.csv [--database D]` ingests (CSV
+header names columns); `examples/weather.{sql,csv}` (`id` INT key; `city`,
+`country`, `conditions` TEXT INDEX) is the worked example. A secondary-index query
+fans out to every shard and combines exactly like a key query (data is sharded by
+the primary key, so each row lives on one shard and the sum never double-counts);
+conjunctive `col1=a AND col2=b` is not yet supported (the planner still rejects
+AND).
 
 **Query path and CLI.** WHERE takes a bound param (`:name`) or an inline literal
 (`= "London"`). A literal is the secret value, so it is client-side sugar:
@@ -271,8 +287,11 @@ is a shared object store (`BlobStoreConfig`, MinIO/S3) — see the TODO in
 
 **Storage.** Per table:
 `<data_dir>/db/<database>/<table>/epochs/<version>/{match.seg,payload.seg,manifest.json}`
-with a per-table `CURRENT` pointer; `match.seg` holds the raw key value
-(`ceil(key_bits/8)` bytes/row), the manifest carries `key_bits`.
+with a per-table `CURRENT` pointer; `match.seg` holds one packed key per
+searchable column (`SearchableCount() * ceil(key_bits/8)` bytes/row; a single-key
+table is one key, byte-identical to before), the manifest carries `key_bits` and
+the schema, so the per-column stride and slice offsets derive from it (no new
+manifest field, no extra segment files).
 `Config::EpochRootFor(db,table)` resolves the root; `LocalEpochRepository` opens
 it; `storage::Catalog` enumerates dbs/tables under `Config::DatabasesDir()`. On
 the node `server::RepositoryManager` caches one repo per `core::TableId` and
