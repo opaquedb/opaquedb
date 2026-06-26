@@ -36,6 +36,10 @@ TokenType KeywordOrIdentifier(std::string_view word) {
     return TokenType::kLike;
   if (upper == "BETWEEN")
     return TokenType::kBetween;
+  if (upper == "LIMIT")
+    return TokenType::kLimit;
+  if (upper == "OFFSET")
+    return TokenType::kOffset;
   if (upper == "CREATE")
     return TokenType::kCreate;
   if (upper == "TABLE")
@@ -229,6 +233,10 @@ std::string ToString(TokenType type) {
     return "LIKE";
   case TokenType::kBetween:
     return "BETWEEN";
+  case TokenType::kLimit:
+    return "LIMIT";
+  case TokenType::kOffset:
+    return "OFFSET";
   case TokenType::kCreate:
     return "CREATE";
   case TokenType::kTable:

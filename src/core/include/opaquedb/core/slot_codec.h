@@ -45,6 +45,19 @@ inline std::uint32_t PayloadPlaneCount(std::uint32_t record_bytes,
   return per == 0 ? 0 : (record_bytes + per - 1) / per;
 }
 
+// The slot distance between adjacent result buckets within one BatchEncoder
+// row. The multi-match matcher stops the block-sum early, leaving `buckets`
+// partial sums per row spaced this far apart; bucket g is read at slot
+// g * BucketStride in row 0 and at row + g * BucketStride in row 1, each one
+// key_bits-wide block. With buckets == 1 the stride is the whole row, which is
+// the single-match path (bucket 0 holds the sum of every block). buckets must
+// be a power of two and at most slot_count / 2 / key_bits.
+inline std::uint32_t BucketStride(std::uint32_t slot_count,
+                                  std::uint32_t buckets) {
+  const std::uint32_t row = slot_count / 2;
+  return buckets == 0 ? row : row / buckets;
+}
+
 // The exact set of Galois rotation steps the bit-sliced matcher needs, so the
 // client generates only these keys instead of the full power-of-two set (which
 // is hundreds of MB at poly 16384). The matcher rotates by:

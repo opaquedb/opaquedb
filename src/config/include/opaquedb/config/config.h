@@ -102,6 +102,18 @@ struct CryptoConfig {
   // power of two so the AND tree is exact.
   std::uint32_t key_bits = 16;
 
+  // How many result buckets a multi-match query partitions rows into. A query
+  // that asks for more than one row (LIMIT > 1 or OFFSET > 0) returns a window
+  // of these buckets; each bucket can hold one matching row. Rows that share a
+  // key are spread across distinct buckets, so up to result_buckets rows with
+  // the same key can be returned (page with OFFSET to walk all of them). Two
+  // matching rows in one bucket collide and that bucket is dropped, so a larger
+  // value lowers the collision ceiling at a small cost. Must be a power of two
+  // and at most (poly_modulus_degree / 2) / key_bits. Default LIMIT 1 with no
+  // OFFSET ignores this and uses a single bucket (the original single-match
+  // path). Keep it modest for performance.
+  std::uint32_t result_buckets = 16;
+
   // Payload bytes packed into one BatchEncoder slot. Each slot holds a value
   // below the plaintext modulus, so we keep one bit of headroom and pack
   // floor((plain_modulus_bits - 1) / 8) bytes, clamped to [1, 7]. This is the

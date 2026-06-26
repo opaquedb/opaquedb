@@ -2,6 +2,8 @@
 #define OPAQUEDB_PLANNER_PLANNER_H_
 
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,6 +34,12 @@ struct PhysicalPlan {
 
   std::vector<std::string> projection;
   std::vector<std::size_t> projection_indices;
+
+  // Public result window carried from the SQL LIMIT/OFFSET. Unset limit means
+  // the default of 1 (single-match, collapse all blocks into one bucket). The
+  // engine resolves these against the configured result_buckets.
+  std::optional<std::uint64_t> limit;
+  std::optional<std::uint64_t> offset;
 };
 
 // Maps a column encoding and a SQL operator to a backend operator, or returns a

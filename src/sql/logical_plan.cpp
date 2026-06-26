@@ -83,6 +83,16 @@ LogicalPlanBuilder &LogicalPlanBuilder::SetMatch(std::string column,
   return *this;
 }
 
+LogicalPlanBuilder &LogicalPlanBuilder::SetLimit(std::uint64_t limit) {
+  plan_.limit = limit;
+  return *this;
+}
+
+LogicalPlanBuilder &LogicalPlanBuilder::SetOffset(std::uint64_t offset) {
+  plan_.offset = offset;
+  return *this;
+}
+
 absl::StatusOr<LogicalPlan> LogicalPlanBuilder::Build() const {
   if (plan_.table.empty()) {
     return absl::InvalidArgumentError("logical plan: table is empty");
@@ -116,6 +126,12 @@ absl::StatusOr<LogicalPlan> BuildLogicalPlan(const SelectStatement &statement) {
   }
   for (const std::string &column : statement.projection) {
     builder.AddProjection(column);
+  }
+  if (statement.limit.has_value()) {
+    builder.SetLimit(*statement.limit);
+  }
+  if (statement.offset.has_value()) {
+    builder.SetOffset(*statement.offset);
   }
   if (statement.where == nullptr) {
     return absl::InvalidArgumentError("logical plan: statement has no WHERE");
