@@ -11,6 +11,8 @@ std::string ToString(ColumnEncoding encoding) {
   switch (encoding) {
   case ColumnEncoding::kEq:
     return "eq";
+  case ColumnEncoding::kIndex:
+    return "index";
   case ColumnEncoding::kPrefix:
     return "prefix";
   case ColumnEncoding::kRange:
@@ -24,6 +26,8 @@ std::string ToString(ColumnEncoding encoding) {
 absl::StatusOr<ColumnEncoding> ParseColumnEncoding(std::string_view text) {
   if (text == "eq")
     return ColumnEncoding::kEq;
+  if (text == "index")
+    return ColumnEncoding::kIndex;
   if (text == "prefix")
     return ColumnEncoding::kPrefix;
   if (text == "range")
@@ -32,6 +36,10 @@ absl::StatusOr<ColumnEncoding> ParseColumnEncoding(std::string_view text) {
     return ColumnEncoding::kRaw;
   return absl::InvalidArgumentError(
       absl::StrCat("unknown column encoding '", text, "'"));
+}
+
+bool IsSearchable(ColumnEncoding encoding) {
+  return encoding == ColumnEncoding::kEq || encoding == ColumnEncoding::kIndex;
 }
 
 std::string ToString(ColumnType type) {
@@ -65,6 +73,29 @@ std::optional<std::size_t> Schema::IndexOf(std::string_view name) const {
   return std::nullopt;
 }
 
+std::size_t Schema::SearchableCount() const {
+  std::size_t count = 0;
+  for (const Column &column : columns_) {
+    if (IsSearchable(column.encoding))
+      ++count;
+  }
+  return count;
+}
+
+std::optional<std::size_t>
+Schema::SearchableRank(std::size_t column_index) const {
+  if (column_index >= columns_.size() ||
+      !IsSearchable(columns_[column_index].encoding)) {
+    return std::nullopt;
+  }
+  std::size_t rank = 0;
+  for (std::size_t i = 0; i < column_index; ++i) {
+    if (IsSearchable(columns_[i].encoding))
+      ++rank;
+  }
+  return rank;
+}
+
 bool Schema::IsMatchable(std::string_view column) const {
   std::optional<std::size_t> idx = IndexOf(column);
   if (!idx)
@@ -91,12 +122,15 @@ absl::Status Schema::Validate() const {
     }
     if (column.encoding == ColumnEncoding::kEq) {
       ++match_keys;
-      // The key is mapped to a constant-weight codeword. INT maps bijectively
-      // (exact match); TEXT maps through a hash (a candidate match the client
-      // verifies). REAL has no well defined equality here.
+    }
+    if (IsSearchable(column.encoding)) {
+      // A match key is mapped to a codeword. INT maps bijectively (exact
+      // match); TEXT maps through a hash (a candidate match the client
+      // verifies). REAL has no well defined equality here. This holds for the
+      // primary key (kEq) and every secondary index (kIndex).
       if (column.type == ColumnType::kReal) {
         return absl::InvalidArgumentError(
-            absl::StrCat("schema: match key '", column.name,
+            absl::StrCat("schema: match column '", column.name,
                          "' must be an INT or TEXT column, not REAL"));
       }
     }

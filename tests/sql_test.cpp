@@ -3,13 +3,16 @@
 #include <string>
 #include <vector>
 
+#include "opaquedb/core/schema.h"
 #include "opaquedb/sql/ast.h"
+#include "opaquedb/sql/ddl.h"
 #include "opaquedb/sql/logical_plan.h"
 #include "opaquedb/sql/parser.h"
 #include "opaquedb/sql/tokenizer.h"
 
 namespace {
 
+using opaquedb::core::ColumnEncoding;
 using opaquedb::sql::AndPredicate;
 using opaquedb::sql::BetweenPredicate;
 using opaquedb::sql::BuildLogicalPlan;
@@ -20,6 +23,7 @@ using opaquedb::sql::LikePredicate;
 using opaquedb::sql::LogicalPlanBuilder;
 using opaquedb::sql::OrPredicate;
 using opaquedb::sql::Parse;
+using opaquedb::sql::ParseCreateTable;
 using opaquedb::sql::Predicate;
 using opaquedb::sql::PredicateVisitor;
 using opaquedb::sql::SelectStatement;
@@ -321,6 +325,35 @@ TEST(Visitor, WalksTheTree) {
 }
 
 // ---- Logical plan --------------------------------------------------------
+
+// ---- DDL -----------------------------------------------------------------
+
+TEST(Ddl, ParsesKeyIndexAndPayloadColumns) {
+  auto schema =
+      ParseCreateTable("CREATE TABLE users (id INT KEY, username TEXT INDEX, "
+                       "password TEXT INDEX, email TEXT)");
+  ASSERT_TRUE(schema.ok()) << schema.status().message();
+  ASSERT_EQ(schema->columns().size(), 4u);
+  EXPECT_EQ(schema->columns()[0].encoding, ColumnEncoding::kEq);
+  EXPECT_EQ(schema->columns()[1].encoding, ColumnEncoding::kIndex);
+  EXPECT_EQ(schema->columns()[2].encoding, ColumnEncoding::kIndex);
+  EXPECT_EQ(schema->columns()[3].encoding, ColumnEncoding::kRaw);
+  // The primary key plus two indexes are searchable; the raw column is not.
+  EXPECT_EQ(schema->SearchableCount(), 3u);
+  EXPECT_EQ(schema->SearchableRank(0), 0u);
+  EXPECT_EQ(schema->SearchableRank(2), 2u);
+  EXPECT_FALSE(schema->SearchableRank(3).has_value());
+}
+
+TEST(Ddl, StillRequiresExactlyOneKey) {
+  EXPECT_FALSE(ParseCreateTable("CREATE TABLE t (a TEXT INDEX, b TEXT)").ok());
+  EXPECT_FALSE(ParseCreateTable("CREATE TABLE t (a INT KEY, b INT KEY)").ok());
+}
+
+TEST(Ddl, RejectsRealIndexColumn) {
+  EXPECT_FALSE(
+      ParseCreateTable("CREATE TABLE t (a INT KEY, b REAL INDEX)").ok());
+}
 
 TEST(LogicalPlan, BuildsForSupportedEquality) {
   auto stmt = Parse("SELECT v, w FROM t WHERE k = :key");

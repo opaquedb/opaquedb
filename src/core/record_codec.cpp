@@ -4,6 +4,7 @@
 
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
+#include "opaquedb/core/key_codec.h"
 
 namespace opaquedb::core {
 namespace {
@@ -125,6 +126,38 @@ EncodeRecord(const Schema &schema, const std::vector<Value> &payload,
                      record_bytes, "-byte record size"));
   }
   out.resize(record_bytes, 0);
+  return out;
+}
+
+absl::StatusOr<std::vector<std::uint8_t>>
+EncodeMatchRecord(const Schema &schema, const Value &key_value,
+                  const std::vector<Value> &payload, std::uint32_t key_bits) {
+  std::vector<std::uint8_t> out;
+  std::size_t payload_index = 0;
+  for (const Column &col : schema.columns()) {
+    // The key column's value comes from key_value; every other column's value
+    // comes from the payload vector, in the same order EncodeRecord consumes
+    // it. Advance the payload cursor for all non-key columns, searchable or
+    // not.
+    const Value *value = nullptr;
+    if (col.encoding == ColumnEncoding::kEq) {
+      value = &key_value;
+    } else {
+      if (payload_index >= payload.size()) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("record has no value for column '", col.name, "'"));
+      }
+      value = &payload[payload_index++];
+    }
+    if (!IsSearchable(col.encoding))
+      continue;
+    absl::StatusOr<KeyEncoding> enc =
+        EncodeKeyValue(col.type, *value, key_bits);
+    if (!enc.ok())
+      return enc.status();
+    std::vector<std::uint8_t> packed = PackKey(enc->value, key_bits);
+    out.insert(out.end(), packed.begin(), packed.end());
+  }
   return out;
 }
 

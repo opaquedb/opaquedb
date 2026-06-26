@@ -258,6 +258,60 @@ TEST_F(ServerEndToEnd, PrivateSelectOnTextKey) {
   (*node)->Shutdown();
 }
 
+// A table with a primary key and a secondary INDEX column can be queried by
+// either. A query on the secondary column matches its own sub-key inside the
+// packed match record while the matcher stays single-key, and the row comes
+// back including the index column itself (it is payload, so it is returnable).
+TEST_F(ServerEndToEnd, PrivateSelectOnSecondaryIndex) {
+  const Schema users(
+      "users", {Column{"id", ColumnEncoding::kEq, ColumnType::kInt},
+                Column{"username", ColumnEncoding::kIndex, ColumnType::kText},
+                Column{"email", ColumnEncoding::kRaw, ColumnType::kText}});
+  std::vector<IngestRow> data = {
+      IngestRow{Value{std::int64_t{1}},
+                {Value{std::string("admin")}, Value{std::string("a@x")}}},
+      IngestRow{Value{std::int64_t{2}},
+                {Value{std::string("bob")}, Value{std::string("b@x")}}},
+      IngestRow{Value{std::int64_t{3}},
+                {Value{std::string("carol")}, Value{std::string("c@x")}}}};
+  auto staging = BuildStagingFromRows(cfg_, users, data);
+  ASSERT_TRUE(staging.ok()) << staging.status().message();
+  auto repo = LocalEpochRepository::Open(cfg_.EpochRootFor("default", "users"));
+  ASSERT_TRUE(repo.ok());
+  ASSERT_TRUE((*repo)->Publish(*staging, 1).ok());
+
+  auto node = NodeServer::Create(cfg_);
+  ASSERT_TRUE(node.ok());
+  ASSERT_TRUE((*node)->Start().ok());
+  ASSERT_TRUE((*node)->WaitForReady().ok());
+  auto client = QueryClient::Create(cfg_, (*node)->listen_address());
+  ASSERT_TRUE(client.ok()) << client.status().message();
+  ASSERT_TRUE((*client)->Register("c1").ok());
+
+  // Query by the secondary index column. SELECT * returns the payload, which
+  // holds the index column (username) and the raw column (email).
+  auto by_name = (*client)->Query(
+      "c1", "SELECT * FROM users WHERE username = \"bob\"", 0, "");
+  ASSERT_TRUE(by_name.ok()) << by_name.status().message();
+  ASSERT_EQ(by_name->size(), 1u);
+  auto nv = opaquedb::core::DecodeRecord(users, (*by_name)[0]);
+  ASSERT_TRUE(nv.ok()) << nv.status().message();
+  ASSERT_EQ(nv->size(), 2u);
+  EXPECT_EQ(std::get<std::string>((*nv)[0]), "bob");
+  EXPECT_EQ(std::get<std::string>((*nv)[1]), "b@x");
+
+  // The same table is still queryable by its primary key.
+  auto by_id =
+      (*client)->Query("c1", "SELECT email FROM users WHERE id = :id", 3, "");
+  ASSERT_TRUE(by_id.ok()) << by_id.status().message();
+  ASSERT_EQ(by_id->size(), 1u);
+  auto iv = opaquedb::core::DecodeRecord(users, (*by_id)[0]);
+  ASSERT_TRUE(iv.ok()) << iv.status().message();
+  EXPECT_EQ(std::get<std::string>((*iv)[1]), "c@x");
+
+  (*node)->Shutdown();
+}
+
 // Two tables in two databases served by one node: each query routes to the
 // right per-table repository. Proves multi-table and multi-database routing.
 TEST_F(ServerEndToEnd, RoutesAcrossDatabasesAndTables) {

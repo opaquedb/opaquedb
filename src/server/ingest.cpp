@@ -12,7 +12,6 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
-#include "opaquedb/core/key_codec.h"
 #include "opaquedb/core/wire.h"
 
 namespace opaquedb::server {
@@ -53,11 +52,11 @@ BuildStagingFromRows(const config::Config &config, const core::Schema &schema,
     return s;
 
   for (std::size_t i = 0; i < rows.size(); ++i) {
-    absl::StatusOr<core::KeyEncoding> key_value =
-        core::EncodeKeyValue(key->type, rows[i].key, key_bits);
-    if (!key_value.ok()) {
+    absl::StatusOr<std::vector<std::uint8_t>> match =
+        core::EncodeMatchRecord(schema, rows[i].key, rows[i].payload, key_bits);
+    if (!match.ok()) {
       return absl::InvalidArgumentError(
-          absl::StrCat("row ", i, ": ", key_value.status().message()));
+          absl::StrCat("row ", i, ": ", match.status().message()));
     }
     absl::StatusOr<std::vector<std::uint8_t>> payload = core::EncodeRecord(
         schema, rows[i].payload, config.storage.record_bytes);
@@ -66,7 +65,7 @@ BuildStagingFromRows(const config::Config &config, const core::Schema &schema,
           absl::StrCat("row ", i, ": ", payload.status().message()));
     }
     storage::Row row;
-    row.match = core::PackKey(key_value->value, key_bits);
+    row.match = *std::move(match);
     row.payload = *std::move(payload);
     if (absl::Status s = staging.AppendRow(std::move(row)); !s.ok())
       return s;
@@ -234,16 +233,16 @@ InsertRowAndPublish(storage::EpochRepository &repo,
       return s;
   }
 
-  absl::StatusOr<core::KeyEncoding> enc =
-      core::EncodeKeyValue(key->type, key_value, key_bits);
-  if (!enc.ok())
-    return enc.status();
+  absl::StatusOr<std::vector<std::uint8_t>> match =
+      core::EncodeMatchRecord(schema, key_value, payload, key_bits);
+  if (!match.ok())
+    return match.status();
   absl::StatusOr<std::vector<std::uint8_t>> rec =
       core::EncodeRecord(schema, payload, manifest.geometry.record_bytes);
   if (!rec.ok())
     return rec.status();
   storage::Row new_row;
-  new_row.match = core::PackKey(enc->value, key_bits);
+  new_row.match = *std::move(match);
   new_row.payload = *std::move(rec);
   if (absl::Status s = staging.AppendRow(std::move(new_row)); !s.ok())
     return s;

@@ -8,6 +8,9 @@ absl::StatusOr<backend::Op> RouteOperator(core::ColumnEncoding encoding,
                                           sql::CompareOp op) {
   switch (encoding) {
   case core::ColumnEncoding::kEq:
+  case core::ColumnEncoding::kIndex:
+    // The primary key and a secondary index are matched the same way; only
+    // their storage role differs.
     switch (op) {
     case sql::CompareOp::kEq:
       return backend::Op::kEq;
@@ -15,7 +18,7 @@ absl::StatusOr<backend::Op> RouteOperator(core::ColumnEncoding encoding,
       return backend::Op::kNe;
     default:
       return absl::InvalidArgumentError(
-          "an EQ column supports only '=' and '<>'; declare a RANGE "
+          "an EQ or INDEX column supports only '=' and '<>'; declare a RANGE "
           "encoding for ordered comparisons");
     }
   case core::ColumnEncoding::kPrefix:
@@ -93,11 +96,12 @@ Planner::Plan(const core::Schema &schema, const sql::LogicalPlan &logical,
   plan.offset = logical.offset;
 
   if (logical.select_all) {
-    // SELECT * expands to every payload (RAW) column in schema order. The match
-    // key is stored as a key value, not in the payload, so it is not
-    // projectable.
+    // SELECT * expands to every payload column in schema order. Payload is
+    // every column except the primary key (kEq): RAW columns and secondary
+    // indexes (kIndex) alike. The primary key is stored as a key value, not in
+    // the payload, so it is not projectable.
     for (std::size_t i = 0; i < schema.columns().size(); ++i) {
-      if (schema.columns()[i].encoding != core::ColumnEncoding::kRaw)
+      if (schema.columns()[i].encoding == core::ColumnEncoding::kEq)
         continue;
       plan.projection.push_back(schema.columns()[i].name);
       plan.projection_indices.push_back(i);

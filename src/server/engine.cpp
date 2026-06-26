@@ -1,5 +1,8 @@
 #include "opaquedb/server/engine.h"
 
+#include <cstddef>
+#include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -20,14 +23,20 @@ namespace {
 // Builds the key column (one key value per row) and the payload column (raw
 // record bytes per row) the backend evaluates over, reading every row of the
 // epoch. The backend lays both out into SIMD slots itself.
+//
+// A match record packs one key per searchable column. match_offset is the byte
+// offset of the queried column's sub-key inside that record (its SearchableRank
+// times the per-key stride), so a query on a secondary index reads its own
+// sub-key while the matcher stays single-key.
 absl::Status BuildColumns(const storage::EpochReader &reader,
-                          backend::KeyColumn *keys,
+                          std::size_t match_offset, backend::KeyColumn *keys,
                           backend::PayloadColumns *payload) {
   const storage::EpochManifest &manifest = reader.manifest();
   keys->key_bits = manifest.key_bits;
   payload->record_bytes = manifest.geometry.record_bytes;
   payload->bytes_per_slot = manifest.geometry.bytes_per_slot;
 
+  const std::size_t stride = storage::MatchRecordBytes(manifest.key_bits);
   const std::uint64_t rows = reader.row_count();
   keys->keys.reserve(rows);
   payload->rows.reserve(rows);
@@ -36,8 +45,12 @@ absl::Status BuildColumns(const storage::EpochReader &reader,
         reader.MatchRecord(r);
     if (!match_bytes.ok())
       return match_bytes.status();
-    absl::StatusOr<std::uint64_t> value =
-        core::UnpackKey(*match_bytes, manifest.key_bits);
+    if (match_offset + stride > match_bytes->size()) {
+      return absl::DataLossError(
+          "match record is too short for the queried column's sub-key");
+    }
+    absl::StatusOr<std::uint64_t> value = core::UnpackKey(
+        match_bytes->subspan(match_offset, stride), manifest.key_bits);
     if (!value.ok())
       return value.status();
     keys->keys.push_back(*value);
@@ -213,12 +226,14 @@ absl::StatusOr<Engine::ShardResult> Engine::EvaluateShard(
   if (!plan.ok())
     return plan.status();
 
-  // v0.1 returns one payload column; projecting a match column is not yet
-  // supported.
+  // The matcher returns payload planes, which hold every column except the
+  // primary key (kEq). Secondary indexes (kIndex) are payload, so they are
+  // projectable; the primary key is not.
   for (std::size_t idx : plan->projection_indices) {
-    if (manifest.schema.columns()[idx].encoding != core::ColumnEncoding::kRaw) {
+    if (manifest.schema.columns()[idx].encoding == core::ColumnEncoding::kEq) {
       return absl::UnimplementedError(
-          "only RAW payload columns can be projected today");
+          "the primary key column is not projectable; it is matched, not "
+          "returned");
     }
   }
 
@@ -255,9 +270,21 @@ absl::StatusOr<Engine::ShardResult> Engine::EvaluateShard(
   // plan->limit/offset are public and resolved on the client.
   query.result_buckets = result_buckets_;
 
+  // Find the queried column's sub-key inside each packed match record. The
+  // planner already verified the column is matchable, so it is searchable.
+  const std::optional<std::size_t> rank =
+      manifest.schema.SearchableRank(plan->match_column_index);
+  if (!rank) {
+    return absl::InternalError(
+        "planner routed a non-searchable column as the match column");
+  }
+  const std::size_t match_offset =
+      *rank * storage::MatchRecordBytes(manifest.key_bits);
+
   backend::KeyColumn keys;
   backend::PayloadColumns payload;
-  if (absl::Status s = BuildColumns(**reader, &keys, &payload); !s.ok()) {
+  if (absl::Status s = BuildColumns(**reader, match_offset, &keys, &payload);
+      !s.ok()) {
     return s;
   }
 

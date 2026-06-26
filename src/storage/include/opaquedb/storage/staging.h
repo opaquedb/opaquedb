@@ -63,8 +63,11 @@ public:
   std::uint32_t key_bits() const { return key_bits_; }
   const SlotGeometry &geometry() const { return geometry_; }
   const std::vector<Row> &rows() const { return rows_; }
+  // The match record packs one key per searchable column (the primary key plus
+  // every secondary index), so the stride scales with the searchable count.
   std::uint32_t match_record_bytes() const {
-    return MatchRecordBytes(key_bits_);
+    return static_cast<std::uint32_t>(schema_.SearchableCount()) *
+           MatchRecordBytes(key_bits_);
   }
 
 private:
