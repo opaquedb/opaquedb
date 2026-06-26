@@ -138,8 +138,9 @@ opaquedb(default)> SELECT city, temperature, conditions FROM weather WHERE id = 
 city=Amsterdam temperature=18 conditions=Cloudy
 opaquedb(default)> SELECT city, temperature FROM weather WHERE country = "JP"
 city=Tokyo temperature=27
-opaquedb(default)> SELECT city, country FROM weather WHERE conditions = "Clear"
+opaquedb(default)> SELECT city, country FROM weather WHERE conditions = "Clear" LIMIT 5
 city=Tokyo country=JP
+city=Santiago country=CL
 opaquedb(default)> SELECT country FROM weather WHERE city = "Atlantis"
 (no rows)
 opaquedb(default)> \quit
@@ -159,6 +160,44 @@ country=NL temperature=18 conditions=Cloudy
 
 `"Amsterdam"` is encrypted before it leaves the client. The node scans every
 row under encryption and returns only the encrypted match.
+
+### Multiple matches: LIMIT and OFFSET
+
+A searchable value can match many rows. The default is `LIMIT 1`, so a bare
+query returns a single row:
+
+```console
+$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE conditions = "Sunny"' \
+    --schema examples/weather.sql
+city=Nairobi country=KE temperature=24
+```
+
+Add `LIMIT n` to get more. Two cities share `conditions = "Sunny"`, and both come
+back in one query:
+
+```console
+$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE conditions = "Sunny" LIMIT 5' \
+    --schema examples/weather.sql
+city=Nairobi country=KE temperature=24
+city=Cairo country=EG temperature=33
+```
+
+`OFFSET m` pages through the matches; rows come back in a stable order across
+queries, so `LIMIT 1 OFFSET 1` returns the second match:
+
+```console
+$ opaquedb query 'SELECT city, country FROM weather WHERE conditions = "Sunny" LIMIT 1 OFFSET 1' \
+    --schema examples/weather.sql
+city=Cairo country=EG
+```
+
+`LIMIT`/`OFFSET` are public (they are not secret, so they stay in the
+plaintext template) and applied on the client. Under the hood the server
+partitions matches into `crypto.result_buckets` buckets (default 16) and packs
+every bucket into one result, so `LIMIT` counts rows rather than bucket slots
+and the encrypted result size does not grow with the limit. A single value can
+therefore return up to `result_buckets` rows in one round trip; raise
+`result_buckets` for more.
 
 ## What it is not
 
@@ -186,6 +225,9 @@ row under encryption and returns only the encrypted match.
   and any number of secondary `INDEX` columns to search on
 - Private equality lookup over encrypted data via Microsoft SEAL (BFV), matching
   on the key or any secondary index
+- Multi-row results with public `LIMIT`/`OFFSET`: a value matching many rows
+  returns them in one round trip, at a result size that does not grow with the
+  limit
 - Sharded cluster with etcd leader election, membership, and query fan-out
 - Versioned immutable epochs: write-ahead log, atomic publish, rollback
 - Token, mTLS, and no-auth modes with constant-time token comparison
