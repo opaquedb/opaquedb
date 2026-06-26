@@ -75,25 +75,40 @@ chosen by measuring against `examples/crypto_bench`: `poly_modulus_degree`
 coefficient modulus, and `key_bits` 16 by default (all configurable). The query
 travels as a single ciphertext.
 
+A secondary `INDEX` column reuses this exact pipeline. Each searchable column's
+key is packed side by side in one record on disk, and the server slices out the
+column the query names, so matching on an index is the same single-key
+evaluation with no extra encrypted multiplies. Because data is sharded by the
+primary key, an index query simply fans out to every shard and sums the
+partials, the same path a key query takes.
+
 ## Quickstart
 
 Build the binary (see [Building](#building)), then declare a table, load a CSV,
 serve it, and run a private query.
 
-Declare a schema with `CREATE TABLE`. One column is the match `KEY`; the rest
-are typed payload columns:
+Declare a schema with `CREATE TABLE`. Exactly one column is the primary `KEY`
+(it is searchable and shards the data). Any column may also be marked `INDEX` to
+make it searchable too; the rest are typed payload columns that are returned but
+not matched:
 
 ```sql
 -- weather.sql
 CREATE TABLE weather (
-  city TEXT KEY,
-  id INT,
-  country TEXT,
+  id INT KEY,
+  city TEXT INDEX,
+  country TEXT INDEX,
   temperature INT,
   humidity INT,
-  conditions TEXT
+  conditions TEXT INDEX
 );
 ```
+
+A query matches on whichever column its `WHERE` names, so this table can be
+looked up by `id`, `city`, `country`, or `conditions`. A `KEY` or `INDEX` column
+must be `INT` or `TEXT` (not `REAL`). An `INDEX` column is stored both as a
+search key and as payload, so it is also returned; the `KEY` column is the one
+exception that is matched but not returned.
 
 The CSV's header names the columns:
 
@@ -113,19 +128,26 @@ opaquedb run --set auth.mode=none --set auth.enable_insecure=true &
 opaquedb load --schema examples/weather.sql --csv examples/weather.csv
 ```
 
-Then open the interactive shell and run private queries by the key:
+Then open the interactive shell and run private queries by any searchable
+column, the primary `KEY` or any `INDEX`:
 
 ```console
 $ opaquedb repl --schema examples/weather.sql
 OpaqueDB shell. \help for commands, \quit to exit.
-opaquedb(default)> SELECT country, temperature, conditions FROM weather WHERE city = "Amsterdam"
-country=NL temperature=18 conditions=Cloudy
-opaquedb(default)> SELECT country, temperature FROM weather WHERE city = "Tokyo"
-country=JP temperature=27
+opaquedb(default)> SELECT city, temperature, conditions FROM weather WHERE id = 1
+city=Amsterdam temperature=18 conditions=Cloudy
+opaquedb(default)> SELECT city, temperature FROM weather WHERE country = "JP"
+city=Tokyo temperature=27
+opaquedb(default)> SELECT city, country FROM weather WHERE conditions = "Clear"
+city=Tokyo country=JP
 opaquedb(default)> SELECT country FROM weather WHERE city = "Atlantis"
 (no rows)
 opaquedb(default)> \quit
 ```
+
+The query value is encrypted whichever column you match on; matching on a
+secondary `INDEX` costs the operator no more information and the same encrypted
+round trip as matching on the key.
 
 A one-shot query works the same way and prints the decoded row:
 
@@ -141,10 +163,11 @@ row under encryption and returns only the encrypted match.
 ## What it is not
 
 - Not a full SQL engine yet. Today the evaluated query is
-  `SELECT <cols> FROM <table> WHERE <key> = :param`. Other operators (IN, LIKE,
-  ranges, AND/OR) already parse but are not evaluated under encryption yet.
-  Widening the set of operators the engine can evaluate privately is active
-  work, so expect more SQL support over time.
+  `SELECT <cols> FROM <table> WHERE <col> = :param`, where `<col>` is the primary
+  `KEY` or any `INDEX` column. One condition per query: other operators (IN,
+  LIKE, ranges) and combining conditions with AND/OR already parse but are not
+  evaluated under encryption yet. Widening the set of operators the engine can
+  evaluate privately is active work, so expect more SQL support over time.
 - Not a way to skip work. PIR requires a full linear scan. Sharding improves
   latency and throughput, not total work.
 - Not anonymity. Authentication is access control: OpaqueDB hides the query
@@ -159,8 +182,10 @@ row under encryption and returns only the encrypted match.
 
 ## Features
 
-- `CREATE TABLE` schemas with typed columns (int, real, text) and a match key
-- Private equality lookup over encrypted data via Microsoft SEAL (BFV)
+- `CREATE TABLE` schemas with typed columns (int, real, text), one match `KEY`,
+  and any number of secondary `INDEX` columns to search on
+- Private equality lookup over encrypted data via Microsoft SEAL (BFV), matching
+  on the key or any secondary index
 - Sharded cluster with etcd leader election, membership, and query fan-out
 - Versioned immutable epochs: write-ahead log, atomic publish, rollback
 - Token, mTLS, and no-auth modes with constant-time token comparison
