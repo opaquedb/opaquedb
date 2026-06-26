@@ -32,13 +32,18 @@ jobs:
       - name: Check formatting
         run: make format-check
 
-  # Configure, build, test, and run clang-tidy. Gated behind formatting so we do
-  # not spend build minutes on a branch that will fail the style check anyway.
+  # Configure, build, and test. Gated behind formatting so we do not spend
+  # build minutes on a branch that will fail the style check anyway. clang-tidy
+  # is intentionally left out of CI: it re-analyzes every source on top of the
+  # build and roughly doubled the job time. Run `make tidy` locally instead.
   build-and-test:
     name: build & test
     needs: format
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # Generous ceiling: a cold cache rebuilds boost, gRPC, protobuf, SEAL, and
+    # etcd from source, which can run well past an hour. Once the vcpkg cache is
+    # warm, later runs finish in a fraction of this.
+    timeout-minutes: 180
     env:
       VCPKG_ROOT: /opt/vcpkg
       # Cache vcpkg build artifacts between runs.
@@ -64,7 +69,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             autoconf autoconf-archive automake bison build-essential \
-            clang clang-tidy cmake curl flex git libtool \
+            clang cmake curl flex git libtool \
             libtool-bin m4 nasm ninja-build perl pkg-config python3 \
             tar unzip zip zlib1g-dev
 
@@ -92,6 +97,3 @@ jobs:
 
       - name: Test
         run: make test
-
-      - name: clang-tidy
-        run: make tidy

@@ -40,7 +40,7 @@ targets. `make help` lists them.
 make configure   # cmake --preset dev (Debug, -Werror); first run builds deps
 make build       # cmake --build --preset dev
 make test        # ctest --preset dev
-make lint        # clang-format check + clang-tidy (CI enforces both)
+make lint        # clang-format check + clang-tidy (CI runs format only)
 make package     # release build, then CPack .deb + .tar.gz
 ```
 
@@ -61,11 +61,12 @@ Git-flow (AVH) drives branches: `main` is production, `develop` is integration,
 work merges through `release/*` and `hotfix/*`; tags are `vX.Y.Z`. The version
 lives only in CMake `project(VERSION)` (checked against `vcpkg.json` at configure
 time) and flows to `OPAQUEDB_VERSION`, `--version`, and CPack. Finishing a
-release (`git flow release finish X.Y.Z`) tags `vX.Y.Z` on `main`; pushing that
-tag triggers `.github/workflows/release.yml`, which builds the release preset,
-runs CPack, and publishes a GitHub Release with the `.deb` and `.tar.gz`
-attached. `.github/workflows/ci.yml` runs the format gate then build/test/tidy on
-pushes and PRs, all through `make`. First release: v0.1.0.
+release (`git flow release finish X.Y.Z`) tags `vX.Y.Z` on `main`. Packaging is
+manual: run `make package` to produce the `.deb` and `.tar.gz` (there is no
+release workflow; building everything from source on a runner timed out).
+`.github/workflows/ci.yml` runs the format gate then build/test on pushes and
+PRs, all through `make`; clang-tidy is not run in CI (it doubled the job time),
+so run `make tidy` locally. First release: v0.1.0.
 
 ### Build environment gotcha (important)
 
