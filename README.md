@@ -7,6 +7,9 @@
 **Run SQL over encrypted data without revealing the query.**
 
 <p>
+  <a href="https://docs.opaquedb.io">
+    <img src="https://img.shields.io/badge/docs-opaquedb.io-2ea44f" alt="Documentation">
+  </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License">
   </a>
@@ -19,6 +22,8 @@
 <p>
   <a href="#what-it-is">What it is</a> &middot;
   <a href="#quickstart">Quickstart</a> &middot;
+  <a href="https://docs.opaquedb.io">Docs</a> &middot;
+  <a href="https://docs.opaquedb.io/use-cases/">Use cases</a> &middot;
   <a href="#what-it-is-not">What it is not</a> &middot;
   <a href="#building">Building</a> &middot;
   <a href="#multi-node-cluster">Cluster</a> &middot;
@@ -30,6 +35,10 @@
 </div>
 
 ---
+
+> **Documentation:** full guides, the SQL reference, deployment, and real-world
+> [use cases](https://docs.opaquedb.io/use-cases/) live at
+> **[docs.opaquedb.io](https://docs.opaquedb.io)**. This README is the quick tour.
 
 ## What it is
 
@@ -51,6 +60,9 @@ Microsoft SEAL with the BFV scheme. The privacy guarantee is precise:
 
 The deployed unit is a sharded cluster of identical nodes. Sharding spreads the
 linear scan that PIR requires across many machines.
+
+For where this fits, from private credential checks to confidential lookups, see
+the [use cases](https://docs.opaquedb.io/use-cases/) on the docs site.
 
 ### How matching works
 
@@ -206,7 +218,8 @@ therefore return up to `result_buckets` rows in one round trip; raise
   `KEY` or any `INDEX` column. One condition per query: other operators (IN,
   LIKE, ranges) and combining conditions with AND/OR already parse but are not
   evaluated under encryption yet. Widening the set of operators the engine can
-  evaluate privately is active work, so expect more SQL support over time.
+  evaluate privately is active work, so expect more SQL support over time; the
+  [docs](https://docs.opaquedb.io) track what is supported.
 - Not a way to skip work. PIR requires a full linear scan. Sharding improves
   latency and throughput, not total work.
 - Not anonymity. Authentication is access control: OpaqueDB hides the query
@@ -272,6 +285,16 @@ docker compose -f docker/docker-compose.yml run --rm tools \
 ```
 
 Any node can be the target; each coordinates the query across all shards.
+
+## Documentation
+
+The full documentation lives at **[docs.opaquedb.io](https://docs.opaquedb.io)**:
+
+- [Use cases](https://docs.opaquedb.io/use-cases/) — what OpaqueDB is good for and
+  how teams put it to work.
+- Guides, the SQL and configuration reference, and deployment notes.
+
+This README is the quick tour; the docs site is the source of truth for usage.
 
 ## References
 
