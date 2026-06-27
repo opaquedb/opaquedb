@@ -10,7 +10,8 @@ add_library(opaquedb_cli
   commands/admin_commands.cpp
   commands/run_command.cpp
   commands/query_command.cpp
-  commands/repl_command.cpp)
+  commands/repl_command.cpp
+  commands/token_command.cpp)
 
 target_include_directories(opaquedb_cli PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)

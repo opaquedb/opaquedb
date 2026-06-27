@@ -13,6 +13,7 @@
 #include "commands/query_command.h"
 #include "commands/repl_command.h"
 #include "commands/run_command.h"
+#include "commands/token_command.h"
 #include "opaquedb/cli/command.h"
 #include "opaquedb/core/version.h"
 
@@ -63,6 +64,7 @@ int Run(int argc, char **argv) {
   commands.push_back(std::make_unique<SchemaCommand>());
   commands.push_back(std::make_unique<EpochCommand>());
   commands.push_back(std::make_unique<TablesCommand>());
+  commands.push_back(std::make_unique<TokenCommand>());
   for (auto &command : commands) {
     command->Register(app, globals, exit_code);
   }
