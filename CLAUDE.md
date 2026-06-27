@@ -205,8 +205,14 @@ dashes. No marketing words. Comments explain why, not what an obvious line does.
 ## Notes worth remembering
 
 **Data model and codecs.** Schemas: `CREATE TABLE name (col TYPE [KEY|INDEX],
-...)`, types INT/REAL/TEXT, exactly one match `KEY` (INT or TEXT, not REAL; no
-`--` comments). A column may instead be marked `INDEX`: a secondary searchable
+...)`, types INT/REAL/TEXT/JSON, exactly one match `KEY` (INT or TEXT, not REAL
+or JSON; no `--` comments). JSON is a payload-only alias for TEXT: stored, packed,
+and decoded byte-identically (the same 2-byte-length + bytes layout), but
+`core::ParseValue` validates it as well-formed JSON at the single text -> Value
+ingest boundary (rejecting malformed JSON), so a client gets back parseable JSON.
+A JSON value lives in the same `std::string` variant alternative as TEXT, so the
+type is known only from the schema, never from a `Value`; it can never be
+searchable (`Schema::Validate` rejects it as kEq/kIndex, like REAL). A column may instead be marked `INDEX`: a secondary searchable
 column (a secondary index). `core::ColumnEncoding` carries the role: `kEq` is the
 one primary key (matched, shards the data, NOT stored in payload), `kIndex` is a
 secondary index (matched like the key AND stored in payload so it is

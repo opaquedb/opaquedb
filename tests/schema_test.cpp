@@ -86,6 +86,21 @@ TEST(Schema, AllowsARealRawPayloadColumn) {
   EXPECT_TRUE(s.Validate().ok());
 }
 
+TEST(Schema, RejectsAJsonMatchKey) {
+  // JSON is payload only; it must never be a match key (primary or index).
+  Schema key("t", {{"k", ColumnEncoding::kEq, ColumnType::kJson}});
+  EXPECT_FALSE(key.Validate().ok());
+  Schema index("t", {{"id", ColumnEncoding::kEq, ColumnType::kInt},
+                     {"doc", ColumnEncoding::kIndex, ColumnType::kJson}});
+  EXPECT_FALSE(index.Validate().ok());
+}
+
+TEST(Schema, AllowsAJsonRawPayloadColumn) {
+  Schema s("t", {{"id", ColumnEncoding::kEq, ColumnType::kInt},
+                 {"doc", ColumnEncoding::kRaw, ColumnType::kJson}});
+  EXPECT_TRUE(s.Validate().ok());
+}
+
 TEST(Schema, IsSearchableCoversKeyAndIndexOnly) {
   EXPECT_TRUE(IsSearchable(ColumnEncoding::kEq));
   EXPECT_TRUE(IsSearchable(ColumnEncoding::kIndex));
@@ -131,8 +146,8 @@ TEST(Schema, EncodingStringsRoundTrip) {
 }
 
 TEST(Schema, TypeStringsRoundTrip) {
-  for (ColumnType t :
-       {ColumnType::kInt, ColumnType::kReal, ColumnType::kText}) {
+  for (ColumnType t : {ColumnType::kInt, ColumnType::kReal, ColumnType::kText,
+                       ColumnType::kJson}) {
     auto parsed = ParseColumnType(ToString(t));
     ASSERT_TRUE(parsed.ok()) << ToString(t);
     EXPECT_EQ(*parsed, t);

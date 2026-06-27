@@ -133,4 +133,37 @@ TEST(RecordCodec, ParseValueParsesEachTypeAndRejectsNonNumbers) {
   EXPECT_FALSE(ParseValue(ColumnType::kReal, "not-a-number").ok());
 }
 
+TEST(RecordCodec, ParseValueAcceptsWellFormedJsonAndRejectsMalformed) {
+  // A JSON column validates its text as JSON, then stores the exact bytes.
+  auto obj = ParseValue(ColumnType::kJson, R"({"a":1,"b":[true,null]})");
+  ASSERT_TRUE(obj.ok()) << obj.status().message();
+  EXPECT_EQ(std::get<std::string>(*obj), R"({"a":1,"b":[true,null]})");
+
+  // Scalars and arrays are valid JSON too.
+  EXPECT_TRUE(ParseValue(ColumnType::kJson, "42").ok());
+  EXPECT_TRUE(ParseValue(ColumnType::kJson, R"("hello")").ok());
+  EXPECT_TRUE(ParseValue(ColumnType::kJson, "[1,2,3]").ok());
+
+  // Malformed JSON is rejected at the ingest boundary.
+  EXPECT_FALSE(ParseValue(ColumnType::kJson, "{not json}").ok());
+  EXPECT_FALSE(ParseValue(ColumnType::kJson, R"({"a":})").ok());
+  EXPECT_FALSE(ParseValue(ColumnType::kJson, "").ok());
+}
+
+TEST(RecordCodec, RoundTripsAJsonPayloadColumnLikeText) {
+  // JSON is stored and decoded exactly like text: a 2-byte length then bytes.
+  Schema schema("t", {{"id", ColumnEncoding::kEq, ColumnType::kInt},
+                      {"doc", ColumnEncoding::kRaw, ColumnType::kJson}});
+  const std::string doc = R"({"city":"London","pop":8908081})";
+  std::vector<Value> payload = {Value{doc}};
+
+  auto encoded = EncodeRecord(schema, payload, /*record_bytes=*/64);
+  ASSERT_TRUE(encoded.ok()) << encoded.status().message();
+
+  auto decoded = DecodeRecord(schema, *encoded);
+  ASSERT_TRUE(decoded.ok()) << decoded.status().message();
+  ASSERT_EQ(decoded->size(), 1u);
+  EXPECT_EQ(std::get<std::string>((*decoded)[0]), doc);
+}
+
 } // namespace

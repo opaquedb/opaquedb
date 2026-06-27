@@ -50,6 +50,8 @@ std::string ToString(ColumnType type) {
     return "real";
   case ColumnType::kText:
     return "text";
+  case ColumnType::kJson:
+    return "json";
   }
   return "unknown";
 }
@@ -61,6 +63,8 @@ absl::StatusOr<ColumnType> ParseColumnType(std::string_view text) {
     return ColumnType::kReal;
   if (text == "text")
     return ColumnType::kText;
+  if (text == "json")
+    return ColumnType::kJson;
   return absl::InvalidArgumentError(
       absl::StrCat("unknown column type '", text, "'"));
 }
@@ -128,10 +132,11 @@ absl::Status Schema::Validate() const {
       // match); TEXT maps through a hash (a candidate match the client
       // verifies). REAL has no well defined equality here. This holds for the
       // primary key (kEq) and every secondary index (kIndex).
-      if (column.type == ColumnType::kReal) {
-        return absl::InvalidArgumentError(
-            absl::StrCat("schema: match column '", column.name,
-                         "' must be an INT or TEXT column, not REAL"));
+      if (column.type == ColumnType::kReal ||
+          column.type == ColumnType::kJson) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "schema: match column '", column.name,
+            "' must be an INT or TEXT column, not ", ToString(column.type)));
       }
     }
   }

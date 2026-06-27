@@ -42,6 +42,9 @@ enum class ColumnType {
   kInt,  // 64-bit signed integer
   kReal, // double-precision float
   kText, // UTF-8 text
+  kJson, // UTF-8 JSON: stored and matched exactly like text, but validated as
+         // JSON on insert so the client gets back well-formed JSON, not an
+         // opaque string. Payload only, never a match key.
 };
 
 std::string ToString(ColumnEncoding encoding);

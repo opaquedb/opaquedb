@@ -116,10 +116,13 @@ CREATE TABLE weather (
 ```
 
 A query matches on whichever column its `WHERE` names, so this table can be
-looked up by `id`, `city`, `country`, or `conditions`. A `KEY` or `INDEX` column
-must be `INT` or `TEXT` (not `REAL`). An `INDEX` column is stored both as a
-search key and as payload, so it is also returned; the `KEY` column is the one
-exception that is matched but not returned.
+looked up by `id`, `city`, `country`, or `conditions`. Column types are `INT`,
+`REAL`, `TEXT`, and `JSON`. A `JSON` column is stored and returned just like
+`TEXT` but its value is validated as well-formed JSON on insert, so clients get
+back parseable JSON, not an opaque string. A `KEY` or `INDEX` column must be
+`INT` or `TEXT` (not `REAL` or `JSON`, which are payload only). An `INDEX` column
+is stored both as a search key and as payload, so it is also returned; the `KEY`
+column is the one exception that is matched but not returned.
 
 The CSV's header names the columns:
 

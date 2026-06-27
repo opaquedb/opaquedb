@@ -13,6 +13,7 @@
 namespace {
 
 using opaquedb::core::ColumnEncoding;
+using opaquedb::core::ColumnType;
 using opaquedb::sql::AndPredicate;
 using opaquedb::sql::BetweenPredicate;
 using opaquedb::sql::BuildLogicalPlan;
@@ -379,6 +380,20 @@ TEST(Ddl, StillRequiresExactlyOneKey) {
 TEST(Ddl, RejectsRealIndexColumn) {
   EXPECT_FALSE(
       ParseCreateTable("CREATE TABLE t (a INT KEY, b REAL INDEX)").ok());
+}
+
+TEST(Ddl, ParsesAJsonPayloadColumn) {
+  auto schema = ParseCreateTable("CREATE TABLE docs (id INT KEY, body JSON)");
+  ASSERT_TRUE(schema.ok()) << schema.status().message();
+  ASSERT_EQ(schema->columns().size(), 2u);
+  EXPECT_EQ(schema->columns()[1].type, ColumnType::kJson);
+  EXPECT_EQ(schema->columns()[1].encoding, ColumnEncoding::kRaw);
+}
+
+TEST(Ddl, RejectsAJsonMatchKey) {
+  EXPECT_FALSE(ParseCreateTable("CREATE TABLE t (k JSON KEY)").ok());
+  EXPECT_FALSE(
+      ParseCreateTable("CREATE TABLE t (a INT KEY, b JSON INDEX)").ok());
 }
 
 TEST(LogicalPlan, BuildsForSupportedEquality) {

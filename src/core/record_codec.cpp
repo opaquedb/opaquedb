@@ -4,6 +4,7 @@
 
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
+#include "nlohmann/json.hpp"
 #include "opaquedb/core/key_codec.h"
 
 namespace opaquedb::core {
@@ -69,6 +70,16 @@ absl::StatusOr<Value> ParseValue(ColumnType type, std::string_view text) {
   }
   case ColumnType::kText:
     return Value{std::string(text)};
+  case ColumnType::kJson: {
+    // JSON is stored as text but must be well formed so the client gets back
+    // parseable JSON, not an opaque string. Validate here, the single text ->
+    // Value boundary every ingest path flows through, then store the bytes.
+    if (!nlohmann::json::accept(text)) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("'", text, "' is not valid JSON"));
+    }
+    return Value{std::string(text)};
+  }
   }
   return absl::InternalError("unknown column type");
 }
@@ -105,6 +116,7 @@ EncodeRecord(const Schema &schema, const std::vector<Value> &payload,
       AppendU64(out, bits);
       break;
     }
+    case ColumnType::kJson:
     case ColumnType::kText: {
       const auto *s = std::get_if<std::string>(&value);
       if (s == nullptr)
@@ -186,6 +198,7 @@ DecodeRecord(const Schema &schema, std::span<const std::uint8_t> record) {
       off += 8;
       break;
     }
+    case ColumnType::kJson:
     case ColumnType::kText: {
       if (off + 2 > record.size())
         return absl::DataLossError("record truncated reading a text length");

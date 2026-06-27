@@ -99,7 +99,7 @@ private:
     if (!type.ok()) {
       return absl::InvalidArgumentError(
           absl::StrCat("column '", *name, "': unknown type '", *type_word,
-                       "', use INT, REAL, or TEXT"));
+                       "', use INT, REAL, TEXT, or JSON"));
     }
     core::Column column;
     column.name = *std::move(name);
