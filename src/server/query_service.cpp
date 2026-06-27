@@ -33,6 +33,20 @@ PeerChannel(const std::string &address, std::uint64_t max_message_bytes,
 
 } // namespace
 
+grpc::Status QueryService::CheckClientOwnership(const std::string &client_id,
+                                                const std::string &principal_id,
+                                                bool claim) {
+  std::lock_guard<std::mutex> lock(owners_mu_);
+  auto it = client_owner_.find(client_id);
+  if (it != client_owner_.end() && it->second != principal_id) {
+    return ToGrpcStatus(absl::PermissionDeniedError(
+        "client id is registered to another principal"));
+  }
+  if (claim && it == client_owner_.end())
+    client_owner_.emplace(client_id, principal_id);
+  return grpc::Status::OK;
+}
+
 std::shared_ptr<grpc::Channel>
 QueryService::PeerChannelFor(const std::string &address) {
   std::lock_guard<std::mutex> lock(channels_mu_);
@@ -126,6 +140,13 @@ QueryService::Register(grpc::ServerContext *context,
     return ToGrpcStatus(
         absl::InvalidArgumentError("register stream carried no chunks"));
   }
+  // Bind the client id to this principal, or reject if another principal owns
+  // it, so a caller cannot overwrite someone else's keyring entry.
+  if (grpc::Status s =
+          CheckClientOwnership(client_id, principal->id, /*claim=*/true);
+      !s.ok()) {
+    return s;
+  }
 
   crypto::KeyMaterial keys;
   keys.public_key = std::move(public_key);
@@ -204,6 +225,12 @@ grpc::Status QueryService::Execute(grpc::ServerContext *context,
     return ToGrpcStatus(absl::FailedPreconditionError(absl::StrCat(
         "wire version ", request->wire_version(), " not supported")));
   }
+  // Only the principal that registered this client id may query under it.
+  if (grpc::Status s = CheckClientOwnership(request->client_id(), principal->id,
+                                            /*claim=*/false);
+      !s.ok()) {
+    return s;
+  }
 
   // With shard peers, coordinate: evaluate the local shard, fan the same query
   // out to the peers at one pinned epoch, and combine. With no peers, answer
@@ -251,8 +278,10 @@ grpc::Status QueryService::Execute(grpc::ServerContext *context,
 grpc::Status QueryService::Insert(grpc::ServerContext *context,
                                   const proto::InsertRequest *request,
                                   proto::InsertReply *reply) {
+  // Insert mutates the table, so it requires the Admin role; a read-only Query
+  // principal cannot write.
   absl::StatusOr<auth::Principal> principal =
-      gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
+      gate_->Check(ExtractAuthInputs(*context), auth::Role::kAdmin);
   if (!principal.ok()) {
     return ToGrpcStatus(principal.status());
   }
