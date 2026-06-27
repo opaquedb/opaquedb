@@ -99,8 +99,14 @@ MtlsAuthenticator::Authenticate(const AuthInputs &inputs) const {
     return absl::UnauthenticatedError(
         "no verified client certificate identity");
   }
-  // Role mapping for mTLS identities (for example an admin certificate) is a
-  // documented extension point; a verified client is a Query principal today.
+  // A verified identity listed as admin gets the Admin role; everyone else is a
+  // Query principal. The identity is the cert subject or SAN the TLS layer
+  // verified, so this is access control over an already-authenticated caller.
+  for (const std::string &admin : admin_identities_) {
+    if (admin == *inputs.peer_identity) {
+      return Principal{*inputs.peer_identity, Role::kAdmin};
+    }
+  }
   return Principal{*inputs.peer_identity, Role::kQuery};
 }
 
@@ -121,7 +127,7 @@ MakeAuthenticator(const config::AuthConfig &cfg) {
   }
   case config::AuthMode::kMtls:
     return std::unique_ptr<Authenticator>(
-        std::make_unique<MtlsAuthenticator>());
+        std::make_unique<MtlsAuthenticator>(cfg.admin_identities));
   case config::AuthMode::kNone:
     if (!cfg.enable_insecure) {
       return absl::FailedPreconditionError(

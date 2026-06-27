@@ -52,12 +52,20 @@ private:
 };
 
 // Client-certificate identity. The verified peer identity becomes the
-// principal.
+// principal. Identities listed as admin get the Admin role; every other
+// verified identity is a Query principal.
 class MtlsAuthenticator : public Authenticator {
 public:
+  MtlsAuthenticator() = default;
+  explicit MtlsAuthenticator(std::vector<std::string> admin_identities)
+      : admin_identities_(std::move(admin_identities)) {}
+
   absl::StatusOr<Principal>
   Authenticate(const AuthInputs &inputs) const override;
   std::string name() const override { return "mtls"; }
+
+private:
+  std::vector<std::string> admin_identities_;
 };
 
 // The open mode. It grants an anonymous Query principal. It is only built when
