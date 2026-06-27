@@ -275,8 +275,8 @@ $ opaquedb query 'SELECT COUNT(*) FROM weather WHERE conditions = "Sunny"' \
 
 ## Features
 
-- `CREATE TABLE` schemas with typed columns (int, real, text), one match `KEY`,
-  and any number of secondary `INDEX` columns to search on
+- `CREATE TABLE` schemas with typed columns (int, real, text, json), one match
+  `KEY`, and any number of secondary `INDEX` columns to search on
 - Private equality lookup over encrypted data via Microsoft SEAL (BFV), matching
   on the key or any secondary index
 - Match a set of values on one column with `IN (...)` or a same-column `OR`, each
