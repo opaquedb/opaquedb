@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <vector>
@@ -73,6 +74,28 @@ public:
   // Points CURRENT back at an already-published version, which must exist and
   // parse. This does not delete newer epochs.
   virtual absl::Status Rollback(std::uint64_t version) = 0;
+
+  // Deletes superseded epoch versions, keeping the `keep` highest versions
+  // (which always include CURRENT) so a bounded rollback window survives.
+  // keep == 0 keeps everything. CURRENT is never deleted. Without this an
+  // append-only insert (which republishes the whole table each time) leaks
+  // every prior epoch forever. Safe to call while readers hold older epochs
+  // mapped: POSIX keeps an unlinked but still-mapped file's inode alive until
+  // the mapping is dropped, so an in-flight query finishes against its pinned
+  // epoch. Callers hold write_mutex() so prune cannot race a publish.
+  virtual absl::Status Prune(std::uint64_t keep) = 0;
+
+  // Serializes a writer's whole read-modify-publish sequence (read the current
+  // epoch, derive the next version, publish it) against other writers to the
+  // same table. Without it two concurrent inserts both read version N, both
+  // build on epoch N, and both try to publish N+1: one loses with
+  // AlreadyExists and, worse, whichever wins drops the other's row. Writers
+  // hold this for the whole sequence; readers never take it (published epochs
+  // are immutable, so OpenCurrent/OpenVersion need no lock).
+  std::mutex &write_mutex() { return write_mu_; }
+
+protected:
+  std::mutex write_mu_;
 };
 
 // A repository backed by a local directory tree:
@@ -92,6 +115,7 @@ public:
   absl::StatusOr<std::unique_ptr<EpochReader>>
   OpenVersion(std::uint64_t version) const override;
   absl::Status Rollback(std::uint64_t version) override;
+  absl::Status Prune(std::uint64_t keep) override;
 
 private:
   explicit LocalEpochRepository(std::string root) : root_(std::move(root)) {}

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -172,6 +173,12 @@ BuildStagingFromCsv(const config::Config &config, const core::Schema &schema,
 absl::StatusOr<InsertResult>
 InsertRowAndPublish(storage::EpochRepository &repo,
                     const std::vector<std::string> &cells) {
+  // Hold the table's write lock for the whole read-modify-publish: we copy the
+  // current epoch's rows and append one, so a concurrent insert must not slip a
+  // publish in between (it would be silently dropped when we publish the next
+  // version built only from rows we saw).
+  std::lock_guard<std::mutex> write_lock(repo.write_mutex());
+
   // The table must already exist; we reuse its current schema and geometry so
   // an insert never changes the layout. A fresh table is created by load.
   absl::StatusOr<std::unique_ptr<storage::EpochReader>> reader =
@@ -251,6 +258,15 @@ InsertRowAndPublish(storage::EpochRepository &repo,
   const std::uint64_t next = current.ok() ? *current + 1 : 1;
   if (absl::Status s = repo.Publish(staging, next); !s.ok())
     return s;
+
+  // Each insert republishes the whole table as a new epoch, so without pruning
+  // the superseded epochs pile up without bound (disk grows quadratically over
+  // a row-by-row load). Keep a small rollback window and drop the rest. Still
+  // under the write lock, so this cannot race another writer's publish; a prune
+  // failure must not fail an insert that already committed, so it is best
+  // effort.
+  constexpr std::uint64_t kInsertEpochRetention = 8;
+  (void)repo.Prune(kInsertEpochRetention);
   return InsertResult{next, existing + 1};
 }
 
