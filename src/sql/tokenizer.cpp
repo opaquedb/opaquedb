@@ -22,6 +22,8 @@ TokenType KeywordOrIdentifier(std::string_view word) {
   const std::string upper = absl::AsciiStrToUpper(word);
   if (upper == "SELECT")
     return TokenType::kSelect;
+  if (upper == "COUNT")
+    return TokenType::kCount;
   if (upper == "FROM")
     return TokenType::kFrom;
   if (upper == "WHERE")
@@ -221,6 +223,8 @@ std::string ToString(TokenType type) {
   switch (type) {
   case TokenType::kSelect:
     return "SELECT";
+  case TokenType::kCount:
+    return "COUNT";
   case TokenType::kFrom:
     return "FROM";
   case TokenType::kWhere:

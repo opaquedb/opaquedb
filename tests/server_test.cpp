@@ -122,6 +122,49 @@ TEST_F(ServerEndToEnd, PrivateSelectReturnsTheRightRow) {
   (*node)->Shutdown();
 }
 
+// WHERE k IN (...) returns every listed row, and SELECT COUNT(*) returns the
+// exact match count from the encrypted presence ciphertext. End to end: the
+// client lifts the inline literals, encrypts one operand per value, the matcher
+// unions them, and the client decodes rows or sums the count.
+TEST_F(ServerEndToEnd, InListAndCountStar) {
+  LoadTable(8); // keys 0..7, values value-0..value-7
+
+  auto node = NodeServer::Create(cfg_);
+  ASSERT_TRUE(node.ok());
+  ASSERT_TRUE((*node)->Start().ok());
+  ASSERT_TRUE((*node)->WaitForReady().ok());
+
+  auto client = QueryClient::Create(cfg_, (*node)->listen_address());
+  ASSERT_TRUE(client.ok()) << client.status().message();
+  ASSERT_TRUE((*client)->Register("c1").ok());
+
+  // IN returns both listed rows (LIMIT high enough to take them all).
+  auto rows = (*client)->Query(
+      "c1", "SELECT v FROM t WHERE k IN (2, 5) LIMIT 10", 0, "");
+  ASSERT_TRUE(rows.ok()) << rows.status().message();
+  std::vector<std::string> got;
+  for (const std::vector<std::uint8_t> &r : *rows)
+    got.push_back(TextValue(r));
+  std::sort(got.begin(), got.end());
+  EXPECT_EQ(got, (std::vector<std::string>{"value-2", "value-5"}));
+
+  // COUNT(*) over the IN list is exactly 2; absent key 0; unique key 1.
+  auto two =
+      (*client)->QueryCount("c1", "SELECT COUNT(*) FROM t WHERE k IN (2, 5)", 0);
+  ASSERT_TRUE(two.ok()) << two.status().message();
+  EXPECT_EQ(*two, 2u);
+  auto none = (*client)->QueryCount(
+      "c1", "SELECT COUNT(*) FROM t WHERE k = :k", 1000);
+  ASSERT_TRUE(none.ok()) << none.status().message();
+  EXPECT_EQ(*none, 0u);
+  auto one =
+      (*client)->QueryCount("c1", "SELECT COUNT(*) FROM t WHERE k = :k", 3);
+  ASSERT_TRUE(one.ok()) << one.status().message();
+  EXPECT_EQ(*one, 1u);
+
+  (*node)->Shutdown();
+}
+
 // Several rows share one key. A LIMIT query partitions matches into buckets and
 // returns all of them; this is the end-to-end multi-result path from SQL
 // through the matcher to the client decode.

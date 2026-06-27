@@ -246,20 +246,35 @@ absl::StatusOr<Engine::ShardResult> Engine::EvaluateShard(
   if (!eval.ok())
     return eval.status();
 
-  // Deserialize and validate the encrypted query against the context. It is a
-  // single ciphertext: the lookup value bit-expanded and tiled across slots.
-  absl::StatusOr<std::vector<seal::Ciphertext>> operand =
-      crypto::DeserializeCiphertexts(ctx_, encrypted_param, /*max_count=*/1);
-  if (!operand.ok())
-    return operand.status();
-  if (operand->size() != 1) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "encrypted query has ", operand->size(), " ciphertexts, expected 1"));
+  // Deserialize and validate the encrypted operand(s) against the context. Each
+  // is a fresh top-level encryption of one lookup value, bit-expanded and tiled
+  // across slots. A point query carries one; IN / same-column OR carries one per
+  // listed value. The plan fixes how many to expect (from the public template),
+  // capped so a hostile template cannot drive unbounded FHE work.
+  constexpr std::size_t kMaxOperands = 64;
+  if (plan->match_operands == 0 || plan->match_operands > kMaxOperands) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("query has ", plan->match_operands,
+                     " match operands, supported range is [1, ", kMaxOperands,
+                     "]"));
+  }
+  absl::StatusOr<std::vector<seal::Ciphertext>> operands =
+      crypto::DeserializeCiphertexts(
+          ctx_, encrypted_param,
+          /*max_count=*/static_cast<std::uint32_t>(plan->match_operands));
+  if (!operands.ok())
+    return operands.status();
+  if (operands->size() != plan->match_operands) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("encrypted query has ", operands->size(),
+                     " ciphertexts, expected ", plan->match_operands));
   }
 
   backend::EncryptedQuery query;
   query.op = plan->op;
-  query.query = std::move((*operand)[0]);
+  query.query = std::move((*operands)[0]);
+  for (std::size_t i = 1; i < operands->size(); ++i)
+    query.extra_operands.push_back(std::move((*operands)[i]));
   // Always partition matches into result_buckets buckets, independent of the
   // query's LIMIT/OFFSET. The whole partition rides in one ciphertext at no
   // extra cost, so the client decodes every bucket and applies LIMIT/OFFSET as
