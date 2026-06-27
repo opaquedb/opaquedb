@@ -81,22 +81,34 @@ jobs:
             exit 1
           }
 
-      # Release notes are the commit messages since the previous tag.
+      # Release notes are the commit messages since the previous tag, kept to
+      # the user-facing conventional-commit types. Housekeeping prefixes (ci,
+      # docs, chore, test, style, refactor, build) are dropped so the notes read
+      # as a changelog, not a commit dump.
       - name: Build release notes from commits
         id: notes
         run: |
           prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" \
             2>/dev/null || true)"
+          range="${GITHUB_REF_NAME}"
+          [ -n "$prev" ] && range="${prev}..${GITHUB_REF_NAME}"
+          # Keep feat, fix, hotfix, perf, revert and security; an optional scope
+          # and a breaking-change "!" are allowed.
+          keep='^- (feat|fix|hotfix|perf|revert|security)(\(.+\))?!?: '
+          changes="$(git log --no-merges --pretty='- %s' "$range" \
+            | grep -E "$keep" || true)"
           {
             echo "notes<<RELEASE_NOTES_EOF"
             if [ -n "$prev" ]; then
               echo "Changes since ${prev}:"
-              echo
-              git log --no-merges --pretty='- %s' "${prev}..${GITHUB_REF_NAME}"
             else
               echo "Changes:"
-              echo
-              git log --no-merges --pretty='- %s' "${GITHUB_REF_NAME}"
+            fi
+            echo
+            if [ -n "$changes" ]; then
+              echo "$changes"
+            else
+              echo "- No user-facing changes."
             fi
             echo "RELEASE_NOTES_EOF"
           } >> "$GITHUB_OUTPUT"

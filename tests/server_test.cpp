@@ -64,9 +64,11 @@ protected:
     cfg_.node.data_dir = dir_.string();
     cfg_.storage.record_bytes = 32;     // small records keep the test quick
     cfg_.server.listen = "127.0.0.1:0"; // ephemeral port
-    // This suite exercises the query path, not auth; run in open mode.
+    // This suite exercises the query path, not auth; run in open mode with a
+    // plaintext client channel (the transport-security suite covers TLS).
     cfg_.auth.mode = opaquedb::config::AuthMode::kNone;
     cfg_.auth.enable_insecure = true;
+    cfg_.client.allow_insecure = true;
   }
   void TearDown() override {
     std::error_code ec;

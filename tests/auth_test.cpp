@@ -93,6 +93,23 @@ TEST(MtlsAuth, UsesPeerIdentity) {
   EXPECT_EQ(principal->id, "spiffe://node-1");
 }
 
+TEST(MtlsAuth, MapsListedIdentityToAdmin) {
+  MtlsAuthenticator authn({"spiffe://admin", "cn=ops"});
+
+  AuthInputs admin_in;
+  admin_in.peer_identity = "spiffe://admin";
+  auto admin = authn.Authenticate(admin_in);
+  ASSERT_TRUE(admin.ok());
+  EXPECT_EQ(admin->role, Role::kAdmin);
+
+  // An identity that is not listed is a Query principal.
+  AuthInputs query_in;
+  query_in.peer_identity = "spiffe://someone-else";
+  auto query = authn.Authenticate(query_in);
+  ASSERT_TRUE(query.ok());
+  EXPECT_EQ(query->role, Role::kQuery);
+}
+
 TEST(NoAuth, GrantsAnonymousQuery) {
   NoAuthenticator authn;
   auto principal = authn.Authenticate(AuthInputs{});

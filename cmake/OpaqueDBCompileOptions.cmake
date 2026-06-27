@@ -24,3 +24,14 @@ else()
     target_compile_options(opaquedb_compile_options INTERFACE -Werror)
   endif()
 endif()
+
+# Coverage instrumentation for first-party code only. The vcpkg dependencies
+# (SEAL, gRPC, ...) are not linked against this INTERFACE target, so they are
+# never instrumented. We force -O0 on our own translation units (the last -O
+# flag wins, overriding the build type) so line attribution is exact; the heavy
+# arithmetic lives in the optimized SEAL release build, so this stays fast.
+if(OPAQUEDB_COVERAGE AND NOT MSVC)
+  target_compile_options(opaquedb_compile_options INTERFACE
+    --coverage -O0 -g -fprofile-update=atomic)
+  target_link_options(opaquedb_compile_options INTERFACE --coverage)
+endif()

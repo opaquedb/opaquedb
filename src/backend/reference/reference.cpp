@@ -456,6 +456,20 @@ ReferenceBackend::combine(EvalContext &ctx,
   for (const auto &shard : partials)
     width = std::max(width, shard.size());
 
+  // Every non-empty shard must agree on the plane count. A disagreement means
+  // the shards answered from inconsistent epochs (different schema or record
+  // geometry); summing plane i of one against plane i of another would add a
+  // payload plane onto a presence plane and silently corrupt the result. Reject
+  // it instead. (Empty shards contribute nothing and are skipped.)
+  for (const auto &shard : partials) {
+    if (!shard.empty() && shard.size() != width) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "reference backend combine: shards disagree on plane count (", width,
+          " vs ", shard.size(),
+          "); the shards answered from inconsistent epochs"));
+    }
+  }
+
   try {
     std::vector<seal::Ciphertext> out;
     out.reserve(width);

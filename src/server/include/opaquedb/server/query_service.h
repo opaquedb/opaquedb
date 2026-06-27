@@ -69,6 +69,13 @@ private:
   // handshake, and the warm flow-control window every time.
   std::shared_ptr<grpc::Channel> PeerChannelFor(const std::string &address);
 
+  // Returns OK if principal_id may use client_id (it owns it or it is
+  // unclaimed), else a PermissionDenied status. claim records ownership on
+  // first registration.
+  grpc::Status CheckClientOwnership(const std::string &client_id,
+                                    const std::string &principal_id,
+                                    bool claim);
+
   Engine *engine_;
   RequestGate *gate_;
   PeerResolver peers_;
@@ -77,6 +84,12 @@ private:
   std::shared_ptr<grpc::ChannelCredentials> peer_creds_;
   std::mutex channels_mu_;
   std::unordered_map<std::string, std::shared_ptr<grpc::Channel>> channels_;
+  // Binds each client_id to the principal that first registered it, so one
+  // principal cannot overwrite or query under another's keyring entry. Only the
+  // coordinator (the node a client registers with) tracks this; intra-cluster
+  // key forwarding over ShardService is trusted (cluster mTLS) and does not.
+  std::mutex owners_mu_;
+  std::unordered_map<std::string, std::string> client_owner_;
 };
 
 } // namespace opaquedb::server

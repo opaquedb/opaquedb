@@ -30,16 +30,38 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "OPAQUEDB_WERROR": "ON"
       }
+    },
+    {
+      "name": "coverage",
+      "displayName": "Coverage build (optimized deps, instrumented first-party code)",
+      "inherits": "release",
+      "cacheVariables": {
+        "OPAQUEDB_WERROR": "OFF",
+        "OPAQUEDB_COVERAGE": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "dev", "configurePreset": "dev" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "coverage", "configurePreset": "coverage" }
   ],
   "testPresets": [
     {
       "name": "dev",
       "configurePreset": "dev",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": false }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "stopOnFailure": false }
+    },
+    {
+      "name": "coverage",
+      "configurePreset": "coverage",
       "output": { "outputOnFailure": true },
       "execution": { "noTestsAction": "error", "stopOnFailure": false }
     }

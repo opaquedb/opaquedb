@@ -6,6 +6,7 @@
 #include <fstream>
 #include <map>
 #include <string>
+#include <vector>
 
 #include "opaquedb/config/config.h"
 
@@ -194,6 +195,51 @@ TEST_F(ConfigTest, MtlsNeedsCertsAndCa) {
                       {"OPAQUEDB_SERVER_TLS_KEY", "/k"},
                       {"OPAQUEDB_AUTH_CA_CERT", "/ca"}});
   EXPECT_TRUE(Load(opts).ok());
+}
+
+TEST_F(ConfigTest, ClientCertPairMustBeSetTogether) {
+  LoadOptions half;
+  half.env = FakeEnv(
+      {{"OPAQUEDB_CLIENT_TLS_CERT", "/c"}, {"OPAQUEDB_CLIENT_CA_CERT", "/ca"}});
+  EXPECT_FALSE(Load(half).ok()); // cert without key
+
+  LoadOptions full;
+  full.env = FakeEnv({{"OPAQUEDB_CLIENT_TLS_CERT", "/c"},
+                      {"OPAQUEDB_CLIENT_TLS_KEY", "/k"},
+                      {"OPAQUEDB_CLIENT_CA_CERT", "/ca"}});
+  EXPECT_TRUE(Load(full).ok());
+}
+
+TEST_F(ConfigTest, ClientMtlsRequiresCaCert) {
+  LoadOptions opts;
+  opts.env = FakeEnv(
+      {{"OPAQUEDB_CLIENT_TLS_CERT", "/c"}, {"OPAQUEDB_CLIENT_TLS_KEY", "/k"}});
+  EXPECT_FALSE(Load(opts).ok()); // client cert but no CA to verify the server
+}
+
+TEST_F(ConfigTest, RejectsZeroRateLimit) {
+  LoadOptions opts;
+  opts.env = FakeEnv({{"OPAQUEDB_SERVER_RATE_LIMIT_PER_SECOND", "0"}});
+  EXPECT_FALSE(Load(opts).ok());
+}
+
+TEST_F(ConfigTest, AdminIdentitiesRoundTrip) {
+  LoadOptions opts;
+  opts.env = FakeEnv({{"OPAQUEDB_AUTH_MODE", "mtls"},
+                      {"OPAQUEDB_SERVER_TLS_CERT", "/c"},
+                      {"OPAQUEDB_SERVER_TLS_KEY", "/k"},
+                      {"OPAQUEDB_AUTH_CA_CERT", "/ca"},
+                      {"OPAQUEDB_AUTH_ADMIN_IDENTITIES", "cn=root,cn=ops"}});
+  auto cfg = Load(opts);
+  ASSERT_TRUE(cfg.ok()) << cfg.status().message();
+  EXPECT_EQ(cfg->auth.admin_identities,
+            (std::vector<std::string>{"cn=root", "cn=ops"}));
+  // Survives a ToToml -> LoadFileOnly round trip.
+  std::string path = WriteTemp(opaquedb::config::ToToml(*cfg));
+  auto reloaded = opaquedb::config::LoadFileOnly(path);
+  ASSERT_TRUE(reloaded.ok()) << reloaded.status().message();
+  EXPECT_EQ(reloaded->auth.admin_identities,
+            (std::vector<std::string>{"cn=root", "cn=ops"}));
 }
 
 TEST_F(ConfigTest, RejectsUnknownKey) {

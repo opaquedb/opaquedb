@@ -52,7 +52,18 @@ public:
   // etcd membership instead.
   void SetQueryPeers(std::vector<std::string> peers);
 
+  // Rebuilds the authenticator from config (re-reading the token file) and
+  // swaps it into the request gate without dropping connections. Called on
+  // SIGHUP so a token rotation takes effect without a restart. Returns an error
+  // if the new config cannot build an authenticator; the old one stays in use.
+  absl::Status ReloadAuth();
+
   const std::string &listen_address() const { return listen_address_; }
+  // The node-to-node listener address. Equals listen_address() when the
+  // Internal service shares the client listener (cluster.listen unset).
+  const std::string &cluster_listen_address() const {
+    return cluster_listen_address_;
+  }
   Engine *engine() { return engine_.get(); }
 
   // Best-effort wait until the server is listening and accepting (useful in
@@ -76,6 +87,11 @@ private:
   config::Config config_;
   std::string listen_address_;
   std::string advertise_address_;
+  // The node-to-node listener and the address peers dial for it. When
+  // cluster.listen is set these name the separate Internal listener; otherwise
+  // they mirror the client listener/advertise (shared listener).
+  std::string cluster_listen_address_;
+  std::string cluster_advertise_address_;
   mutable std::mutex peers_mutex_;
   std::vector<std::string> query_peers_;
   std::mutex cluster_cache_mu_;
@@ -85,7 +101,7 @@ private:
   std::unique_ptr<storage::EpochRepository> repo_;
   std::unique_ptr<RepositoryManager> repo_manager_;
   std::unique_ptr<admin::KeyringStore> keyring_;
-  std::unique_ptr<auth::Authenticator> authenticator_;
+  std::shared_ptr<auth::Authenticator> authenticator_;
   std::unique_ptr<RequestGate> gate_;
   std::unique_ptr<Engine> engine_;
   std::unique_ptr<QueryService> service_;
@@ -95,6 +111,8 @@ private:
   std::unique_ptr<cluster::EtcdClient> etcd_;
   std::unique_ptr<cluster::ClusterManager> cluster_;
   std::unique_ptr<grpc::Server> server_;
+  // The separate node-to-node server, present only when cluster.listen is set.
+  std::unique_ptr<grpc::Server> cluster_server_;
   std::shared_ptr<grpc::ChannelCredentials> peer_creds_;
 };
 
