@@ -146,7 +146,7 @@ Then open the interactive shell and run private queries by any searchable
 column, the primary `KEY` or any `INDEX`:
 
 ```console
-$ opaquedb repl --schema examples/weather.sql
+$ opaquedb repl
 OpaqueDB shell. \help for commands, \quit to exit.
 opaquedb(default)> SELECT city, temperature, conditions FROM weather WHERE id = 1
 city=Amsterdam temperature=18 conditions=Cloudy
@@ -167,8 +167,7 @@ round trip as matching on the key.
 A one-shot query works the same way and prints the decoded row:
 
 ```console
-$ opaquedb query 'SELECT country, temperature, conditions FROM weather WHERE city = "Amsterdam"' \
-    --schema examples/weather.sql
+$ opaquedb query 'SELECT country, temperature, conditions FROM weather WHERE city = "Amsterdam"'
 country=NL temperature=18 conditions=Cloudy
 ```
 
@@ -181,8 +180,7 @@ A searchable value can match many rows. The default is `LIMIT 1`, so a bare
 query returns a single row:
 
 ```console
-$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE conditions = "Sunny"' \
-    --schema examples/weather.sql
+$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE conditions = "Sunny"'
 city=Nairobi country=KE temperature=24
 ```
 
@@ -190,8 +188,7 @@ Add `LIMIT n` to get more. Two cities share `conditions = "Sunny"`, and both com
 back in one query:
 
 ```console
-$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE conditions = "Sunny" LIMIT 5' \
-    --schema examples/weather.sql
+$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE conditions = "Sunny" LIMIT 5'
 city=Nairobi country=KE temperature=24
 city=Cairo country=EG temperature=33
 ```
@@ -200,8 +197,7 @@ city=Cairo country=EG temperature=33
 queries, so `LIMIT 1 OFFSET 1` returns the second match:
 
 ```console
-$ opaquedb query 'SELECT city, country FROM weather WHERE conditions = "Sunny" LIMIT 1 OFFSET 1' \
-    --schema examples/weather.sql
+$ opaquedb query 'SELECT city, country FROM weather WHERE conditions = "Sunny" LIMIT 1 OFFSET 1'
 city=Cairo country=EG
 ```
 
@@ -221,8 +217,7 @@ nothing about any of them. Pair them with `LIMIT` to return more than the defaul
 one row:
 
 ```console
-$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE city IN ("Tokyo", "Cairo", "London") LIMIT 5' \
-    --schema examples/weather.sql
+$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE city IN ("Tokyo", "Cairo", "London") LIMIT 5'
 city=London country=GB temperature=11
 city=Tokyo country=JP temperature=27
 city=Cairo country=EG temperature=33
@@ -231,8 +226,7 @@ city=Cairo country=EG temperature=33
 A flat `OR` on the same column is the same union written differently:
 
 ```console
-$ opaquedb query 'SELECT city, temperature FROM weather WHERE city = "Tokyo" OR city = "Nairobi" LIMIT 5' \
-    --schema examples/weather.sql
+$ opaquedb query 'SELECT city, temperature FROM weather WHERE city = "Tokyo" OR city = "Nairobi" LIMIT 5'
 city=Nairobi temperature=24
 city=Tokyo temperature=27
 ```
@@ -247,8 +241,7 @@ two columns) is not evaluated yet.
 count is exact and the operator still never sees the value:
 
 ```console
-$ opaquedb query 'SELECT COUNT(*) FROM weather WHERE conditions = "Sunny"' \
-    --schema examples/weather.sql
+$ opaquedb query 'SELECT COUNT(*) FROM weather WHERE conditions = "Sunny"'
 2
 ```
 

@@ -271,7 +271,11 @@ CLI11; command files live under `src/cli/commands/`; shared helpers (`LoadConfig
 for config+logging, `ReadFile`, the row renderers `RenderRaw`/`RenderWithSchema`)
 live in `src/cli/util.{h,cpp}`. `repl` registers keys once then runs each SELECT
 privately; line editing and tab-completion are via replxx; meta-commands `\use
-<db>`, `\schema <file>`, `\tables`, `\help`, `\quit`. `insert --table T
+<db>`, `\tables`, `\help`, `\quit`. `query`/`repl` no longer take a `--schema`
+file: the client fetches the table schema from the node via the `DescribeTable`
+RPC (public, Query role) and decodes rows from it (caching per `db.table` in the
+repl), falling back to `RenderRaw` hex if the fetch fails; only `load` still
+needs `--schema` (it is the DDL that defines the table). `insert --table T
 [--database D] v1 v2 ...` appends one row over the `Insert` RPC
 (`QueryClient::Insert` -> `Engine::InsertRow` -> `server::InsertRowAndPublish`):
 epochs are immutable, so it copies existing rows' raw bytes, appends the encoded

@@ -15,7 +15,6 @@
 #include "absl/strings/str_split.h"
 #include "absl/strings/strip.h"
 #include "opaquedb/client/query_client.h"
-#include "opaquedb/sql/ddl.h"
 #include "opaquedb/sql/parser.h"
 #include "opaquedb/storage/catalog.h"
 #include "replxx.hxx"
@@ -34,8 +33,6 @@ void PrintHelp() {
                "  <SELECT ...>        run a private query in the current "
                "database\n"
                "  \\use <database>     switch the current database\n"
-               "  \\schema <file>      load a CREATE TABLE schema to decode "
-               "rows\n"
                "  \\tables             list tables in the current database\n"
                "  \\help               show this help\n"
                "  \\quit               exit\n"
@@ -54,8 +51,6 @@ void ReplCommand::Register(CLI::App &parent, const GlobalOptions &globals,
   repl->add_option("--token", token_, "Bearer token for token auth mode");
   repl->add_option("--database", database_, "Initial database")
       ->default_val("default");
-  repl->add_option("--schema", schema_,
-                   "CREATE TABLE schema file, to decode typed results");
   repl->callback([this, &globals, &exit_code]() {
     absl::StatusOr<config::Config> config = LoadConfig(globals);
     if (!config.ok()) {
@@ -63,26 +58,6 @@ void ReplCommand::Register(CLI::App &parent, const GlobalOptions &globals,
       exit_code = 1;
       return;
     }
-
-    core::Schema schema;
-    bool have_schema = false;
-    auto load_schema = [&](const std::string &path) -> bool {
-      absl::StatusOr<std::string> ddl = ReadFile(path);
-      if (!ddl.ok()) {
-        std::cout << "schema: " << ddl.status().message() << "\n";
-        return false;
-      }
-      absl::StatusOr<core::Schema> parsed = sql::ParseCreateTable(*ddl);
-      if (!parsed.ok()) {
-        std::cout << "schema: " << parsed.status().message() << "\n";
-        return false;
-      }
-      schema = *std::move(parsed);
-      have_schema = true;
-      return true;
-    };
-    if (!schema_.empty())
-      load_schema(schema_);
 
     const std::string target =
         target_.empty() ? DialTarget(config->server.listen) : target_;
@@ -111,8 +86,8 @@ void ReplCommand::Register(CLI::App &parent, const GlobalOptions &globals,
     rx.set_completion_callback([](const std::string &context,
                                   int &len) -> replxx::Replxx::completions_t {
       static const std::vector<std::string> kCandidates = {
-          "SELECT", "FROM",     "WHERE",    "AND",    "OR",
-          "\\use",  "\\schema", "\\tables", "\\help", "\\quit"};
+          "SELECT", "FROM",     "WHERE",  "AND",   "OR",
+          "\\use",  "\\tables", "\\help", "\\quit"};
       const std::size_t ws = context.find_last_of(" \t");
       const std::string prefix =
           context.substr(ws == std::string::npos ? 0 : ws + 1);
@@ -165,12 +140,6 @@ void ReplCommand::Register(CLI::App &parent, const GlobalOptions &globals,
               database = std::string(arg);
             }
           }
-        } else if (cmd == "\\schema") {
-          if (arg.empty())
-            std::cout << "usage: \\schema <file>\n";
-          else if (load_schema(std::string(arg)))
-            std::cout << "decoding rows with schema for table '"
-                      << schema.table() << "'\n";
         } else if (cmd == "\\tables") {
           // Tables in the current database, names only.
           storage::Catalog catalog(config->DatabasesDir());
@@ -198,7 +167,7 @@ void ReplCommand::Register(CLI::App &parent, const GlobalOptions &globals,
       // columns, and fetch (and cache) the table's schema to decode rows.
       std::vector<std::string> projection;
       bool count_star = false;
-      const core::Schema *render_schema = have_schema ? &schema : nullptr;
+      const core::Schema *render_schema = nullptr;
       if (absl::StatusOr<sql::SelectStatement> stmt =
               sql::Parse(std::string(trimmed));
           stmt.ok()) {

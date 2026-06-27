@@ -11,7 +11,6 @@
 #include "opaquedb/client/query_client.h"
 #include "opaquedb/core/record_codec.h"
 #include "opaquedb/core/schema.h"
-#include "opaquedb/sql/ddl.h"
 #include "opaquedb/sql/parser.h"
 #include "spdlog/spdlog.h"
 
@@ -45,8 +44,6 @@ void QueryCommand::Register(CLI::App &parent, const GlobalOptions &globals,
   query->add_option("--backend", backend_,
                     "Backend name (default: by capability)");
   query->add_option("--token", token_, "Bearer token for token auth mode");
-  query->add_option("--schema", schema_,
-                    "CREATE TABLE schema file, to decode typed results");
   query->callback([this, &globals, &exit_code]() {
     absl::StatusOr<config::Config> config = LoadConfig(globals);
     if (!config.ok()) {
@@ -57,22 +54,6 @@ void QueryCommand::Register(CLI::App &parent, const GlobalOptions &globals,
 
     core::Schema schema;
     bool have_schema = false;
-    if (!schema_.empty()) {
-      absl::StatusOr<std::string> ddl = ReadFile(schema_);
-      if (!ddl.ok()) {
-        spdlog::error("query: {}", ddl.status().message());
-        exit_code = 1;
-        return;
-      }
-      absl::StatusOr<core::Schema> parsed = sql::ParseCreateTable(*ddl);
-      if (!parsed.ok()) {
-        spdlog::error("query: schema: {}", parsed.status().message());
-        exit_code = 1;
-        return;
-      }
-      schema = *std::move(parsed);
-      have_schema = true;
-    }
 
     const std::string target =
         target_.empty() ? DialTarget(config->server.listen) : target_;
@@ -91,21 +72,19 @@ void QueryCommand::Register(CLI::App &parent, const GlobalOptions &globals,
     }
 
     // Parse the SQL for the projection and table so results show only the
-    // selected columns. If no schema file was given, fetch the table's schema
-    // from the node so rows decode without --schema.
+    // selected columns, and fetch the table's schema from the node so rows
+    // decode into typed columns.
     std::vector<std::string> projection;
     bool count_star = false;
     if (absl::StatusOr<sql::SelectStatement> stmt = sql::Parse(sql_);
         stmt.ok()) {
       projection = stmt->projection;
       count_star = stmt->count_star;
-      if (!have_schema) {
-        if (absl::StatusOr<core::Schema> fetched =
-                (*client)->DescribeTable(database_, stmt->table);
-            fetched.ok()) {
-          schema = *std::move(fetched);
-          have_schema = true;
-        }
+      if (absl::StatusOr<core::Schema> fetched =
+              (*client)->DescribeTable(database_, stmt->table);
+          fetched.ok()) {
+        schema = *std::move(fetched);
+        have_schema = true;
       }
     }
 

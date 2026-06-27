@@ -24,7 +24,6 @@ private:
   std::string client_id_ = "dev";
   std::string backend_;
   std::string token_;
-  std::string schema_;
 };
 
 } // namespace opaquedb::cli
