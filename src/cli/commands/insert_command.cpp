@@ -31,7 +31,8 @@ void InsertCommand::Register(CLI::App &parent, const GlobalOptions &globals,
   insert->add_option("--database", database_,
                      "Database holding the table (default \"default\")");
   insert->add_option("--target", target_, "host:port (default: from config)");
-  insert->add_option("--token", token_, "Bearer token for token auth mode");
+  insert->add_option("--token", token_,
+                     "Bearer token (insert requires the Admin role)");
   insert
       ->add_option("values", values_,
                    "Column values in CREATE TABLE order, including the key")
