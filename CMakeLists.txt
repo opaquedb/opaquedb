@@ -19,6 +19,7 @@ endif()
 
 option(OPAQUEDB_WERROR "Treat warnings as errors for first-party targets" OFF)
 option(OPAQUEDB_BUILD_TESTS "Build the test suite" ON)
+option(OPAQUEDB_COVERAGE "Instrument first-party targets for gcov coverage" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(OpaqueDBCompileOptions)

@@ -3,6 +3,7 @@
 #include <exception>
 #include <optional>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 #include "absl/strings/str_cat.h"
@@ -90,9 +91,27 @@ BuildEncryptedOperands(const CryptoContext &ctx, const seal::PublicKey &pub,
   if (values.empty()) {
     return absl::InvalidArgumentError("operand list is empty");
   }
+  // The matcher sums one equality indicator per operand and assumes the
+  // operands are disjoint (a key equals at most one of them). A duplicate value
+  // would make a matching row's indicator 2 instead of 1: the payload is
+  // doubled and the presence count of 2 looks like a bucket collision, so the
+  // row is dropped. WHERE k IN (5, 5) or k = 5 OR k = 5 hits exactly this.
+  // Dedup here, the single point every operand list flows through, so the
+  // disjointness the matcher relies on always holds. Stable order keeps the
+  // first operand (the primary) predictable.
+  std::vector<std::uint64_t> distinct;
+  distinct.reserve(values.size());
+  {
+    std::unordered_set<std::uint64_t> seen;
+    seen.reserve(values.size());
+    for (std::uint64_t value : values) {
+      if (seen.insert(value).second)
+        distinct.push_back(value);
+    }
+  }
   std::vector<seal::Ciphertext> ciphers;
-  ciphers.reserve(values.size());
-  for (std::uint64_t value : values) {
+  ciphers.reserve(distinct.size());
+  for (std::uint64_t value : distinct) {
     absl::StatusOr<seal::Ciphertext> cipher =
         EncryptOperand(ctx, pub, value, key_bits);
     if (!cipher.ok())

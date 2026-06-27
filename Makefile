@@ -15,7 +15,7 @@ export VCPKG_ROOT ?= /opt/vcpkg
 # the optimized build used for packaging.
 PRESET ?= dev
 
-.PHONY: help configure build test lint format format-check tidy package release clean all
+.PHONY: help configure build test test-fast coverage hooks lint format format-check tidy package release clean all
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -27,8 +27,32 @@ configure: ## Configure the build (PRESET=dev|release); first run builds deps
 build: ## Build the configured preset (PRESET=dev|release)
 	cmake --build --preset $(PRESET)
 
-test: ## Run the test suite
-	ctest --preset dev
+test: ## Run the test suite (PRESET=dev|release; release is far faster)
+	ctest --preset $(PRESET)
+
+test-fast: ## Configure, build, and test the release preset (fast SEAL)
+	$(MAKE) configure PRESET=release
+	$(MAKE) build PRESET=release
+	ctest --preset release
+
+# Coverage uses the optimized dependency build (SEAL is fast) but compiles our
+# own code at -O0 with gcov instrumentation, so a full run finishes in minutes,
+# not the tens-of-minutes a Debug run costs. gcovr renders the report.
+coverage: ## Build instrumented, run tests, and write build/coverage/coverage.html
+	cmake --preset coverage
+	cmake --build --preset coverage
+	ctest --preset coverage
+	gcovr --root . --filter 'src/' \
+	  --exclude '.*_test\.cpp' \
+	  --print-summary \
+	  --html-details build/coverage/coverage.html \
+	  --txt build/coverage/coverage.txt \
+	  build/coverage
+	@echo "Coverage report: build/coverage/coverage.html"
+
+hooks: ## Enable the tracked git hooks (clang-format on commit)
+	git config core.hooksPath .githooks
+	@echo "git hooks enabled: .githooks (pre-commit formats staged C++)"
 
 format: ## Reformat all C++ sources in place
 	find src tests -type f \( -name '*.cpp' -o -name '*.h' \) -print0 \
