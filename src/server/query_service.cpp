@@ -79,9 +79,9 @@ grpc::Status
 QueryService::Register(grpc::ServerContext *context,
                        grpc::ServerReader<proto::RegisterChunk> *reader,
                        proto::RegisterReply *reply) {
-  if (absl::StatusOr<auth::Principal> principal =
-          gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
-      !principal.ok()) {
+  absl::StatusOr<auth::Principal> principal =
+      gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
+  if (!principal.ok()) {
     return ToGrpcStatus(principal.status());
   }
   std::string client_id;
@@ -134,7 +134,8 @@ QueryService::Register(grpc::ServerContext *context,
   if (absl::Status s = engine_->RegisterClient(client_id, keys); !s.ok()) {
     return ToGrpcStatus(s);
   }
-  spdlog::info("client {} registered keys", client_id);
+  spdlog::info("audit: register principal={} client={}", principal->id,
+               client_id);
 
   // The node that received this Register is the coordinator for the client: it
   // stored the keys locally above and now distributes them to every shard peer
@@ -194,9 +195,9 @@ QueryService::Register(grpc::ServerContext *context,
 grpc::Status QueryService::Execute(grpc::ServerContext *context,
                                    const proto::QueryRequest *request,
                                    proto::QueryReply *reply) {
-  if (absl::StatusOr<auth::Principal> principal =
-          gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
-      !principal.ok()) {
+  absl::StatusOr<auth::Principal> principal =
+      gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
+  if (!principal.ok()) {
     return ToGrpcStatus(principal.status());
   }
   if (request->wire_version() != core::kWireVersion) {
@@ -210,14 +211,17 @@ grpc::Status QueryService::Execute(grpc::ServerContext *context,
   const std::vector<std::string> peers = peers_();
   absl::StatusOr<Engine::QueryResult> result = absl::UnknownError("unset");
   if (peers.empty()) {
-    spdlog::info("query from client {} on database {} (single-node)",
-                 request->client_id(), request->database());
+    spdlog::info(
+        "audit: query principal={} client={} database={} (single-node)",
+        principal->id, request->client_id(), request->database());
     result = engine_->Execute(request->client_id(), request->database(),
                               request->sql_template(),
                               request->encrypted_param(), request->backend());
   } else {
-    spdlog::info("query from client {} on database {} (coordinating {} peers)",
-                 request->client_id(), request->database(), peers.size());
+    spdlog::info("audit: query principal={} client={} database={} "
+                 "(coordinating {} peers)",
+                 principal->id, request->client_id(), request->database(),
+                 peers.size());
     std::vector<std::shared_ptr<grpc::Channel>> channels;
     channels.reserve(peers.size());
     for (const std::string &peer : peers) {
@@ -247,9 +251,9 @@ grpc::Status QueryService::Execute(grpc::ServerContext *context,
 grpc::Status QueryService::Insert(grpc::ServerContext *context,
                                   const proto::InsertRequest *request,
                                   proto::InsertReply *reply) {
-  if (absl::StatusOr<auth::Principal> principal =
-          gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
-      !principal.ok()) {
+  absl::StatusOr<auth::Principal> principal =
+      gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
+  if (!principal.ok()) {
     return ToGrpcStatus(principal.status());
   }
   if (request->wire_version() != core::kWireVersion) {
@@ -267,8 +271,10 @@ grpc::Status QueryService::Insert(grpc::ServerContext *context,
                  outcome.status().message());
     return ToGrpcStatus(outcome.status());
   }
-  spdlog::info("inserted 1 row into {}.{} ({} rows total, epoch {})", db,
-               request->table(), outcome->row_count, outcome->epoch_version);
+  spdlog::info(
+      "audit: insert principal={} into {}.{} ({} rows total, epoch {})",
+      principal->id, db, request->table(), outcome->row_count,
+      outcome->epoch_version);
   reply->set_epoch_version(outcome->epoch_version);
   reply->set_row_count(outcome->row_count);
   return grpc::Status::OK;

@@ -3,14 +3,29 @@
 #include "absl/strings/str_cat.h"
 #include "opaquedb/core/wire.h"
 #include "opaquedb/crypto/key_material.h"
-#include "opaquedb/server/query_service.h" // ToGrpcStatus
+#include "opaquedb/server/query_service.h" // ToGrpcStatus, ExtractAuthInputs
 #include "spdlog/spdlog.h"
 
 namespace opaquedb::server {
 
-grpc::Status ShardService::Evaluate(grpc::ServerContext * /*context*/,
+grpc::Status
+ShardService::AuthorizePeer(const grpc::ServerContext &context) const {
+  if (!require_peer_cert_)
+    return grpc::Status::OK;
+  const auth::AuthInputs inputs = ExtractAuthInputs(context);
+  if (!inputs.peer_identity || inputs.peer_identity->empty()) {
+    spdlog::warn("audit: internal RPC rejected: no verified peer certificate");
+    return ToGrpcStatus(absl::PermissionDeniedError(
+        "node-to-node RPC requires a verified cluster certificate"));
+  }
+  return grpc::Status::OK;
+}
+
+grpc::Status ShardService::Evaluate(grpc::ServerContext *context,
                                     const proto::ShardQuery *request,
                                     proto::ShardPartial *reply) {
+  if (grpc::Status s = AuthorizePeer(*context); !s.ok())
+    return s;
   if (request->wire_version() != core::kWireVersion) {
     return ToGrpcStatus(absl::FailedPreconditionError(absl::StrCat(
         "wire version ", request->wire_version(), " not supported")));
@@ -27,9 +42,11 @@ grpc::Status ShardService::Evaluate(grpc::ServerContext * /*context*/,
 }
 
 grpc::Status
-ShardService::RegisterKeys(grpc::ServerContext * /*context*/,
+ShardService::RegisterKeys(grpc::ServerContext *context,
                            grpc::ServerReader<proto::KeyUploadChunk> *reader,
                            proto::KeyUploadReply *reply) {
+  if (grpc::Status s = AuthorizePeer(*context); !s.ok())
+    return s;
   std::string client_id;
   crypto::KeyMaterial keys;
   bool seen = false;
