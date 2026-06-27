@@ -15,7 +15,17 @@ export VCPKG_ROOT ?= /opt/vcpkg
 # the optimized build used for packaging.
 PRESET ?= dev
 
-.PHONY: help configure build test test-fast coverage hooks lint format format-check tidy package release clean all
+# Docker image coordinates. Override IMAGE to publish under your own namespace,
+# e.g. `make docker-push IMAGE=youruser/opaquedb`. The tag comes from vcpkg.json
+# (the version the build already checks against CMake project(VERSION)), so the
+# image tag never drifts from the binary it carries.
+IMAGE ?= opaquedb/opaquedb
+VERSION := $(shell sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' vcpkg.json | head -1)
+# Architectures for the published multi-arch image. amd64 + arm64 covers Intel
+# servers and Apple Silicon.
+PLATFORMS ?= linux/amd64,linux/arm64
+
+.PHONY: help configure build test test-fast coverage hooks lint format format-check tidy package release docker-build docker-push clean all
 
 help: ## List the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -76,6 +86,22 @@ release: ## Full release build, then package (.deb + .tar.gz)
 	$(MAKE) configure PRESET=release
 	$(MAKE) build PRESET=release
 	$(MAKE) package
+
+# Docker build the runtime image for the host architecture and load it into the
+# local daemon. Tags both the version and latest so docker-compose's
+# `image: opaquedb/opaquedb:latest` resolves. Use this to test before pushing.
+docker-build: ## Build the runtime image for the host arch (tags :$(VERSION) and :latest)
+	docker build -f docker/Dockerfile \
+	  -t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
+
+# Build the multi-arch image and push in one step. A multi-arch manifest cannot
+# be loaded into the local daemon, so build+push is a single buildx invocation
+# (run `docker login` first). Needs a buildx builder: `docker buildx create --use`.
+docker-push: ## Build multi-arch and push to the registry (IMAGE=ns/name, PLATFORMS=...)
+	docker buildx build -f docker/Dockerfile \
+	  --platform $(PLATFORMS) \
+	  -t $(IMAGE):$(VERSION) -t $(IMAGE):latest \
+	  --push .
 
 clean: ## Remove the build trees
 	rm -rf build

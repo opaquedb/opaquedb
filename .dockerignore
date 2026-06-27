@@ -1,0 +1,30 @@
+# Keep the build context small and reproducible. The Dockerfile copies only the
+# sources it needs, but the daemon still has to transfer the whole context, and
+# `build/` alone is tens of GB here. Send only what a clean build requires.
+
+# Build trees and vcpkg working/cache dirs (huge, machine-local).
+build/
+.vcpkg-bt/
+vcpkg_installed/
+
+# VCS and CI metadata.
+.git/
+.github/
+.githooks/
+
+# Editor, dev container, and local tooling.
+.devcontainer/
+.claude/
+.vscode/
+*.swp
+
+# Generated coverage and packaging output.
+coverage/
+*.deb
+*.tar.gz
+
+# Local cmake user presets (the image build uses the tracked presets only).
+CMakeUserPresets.json
+
+# Docs not needed to compile the binary.
+*.md
