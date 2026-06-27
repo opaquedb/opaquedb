@@ -72,10 +72,14 @@ public:
   explicit PlanningVisitor(LogicalPlanBuilder &builder) : builder_(builder) {}
 
   absl::Status Visit(const ComparisonPredicate &node) override {
-    if (node.op() != CompareOp::kEq) {
+    // Equality and inequality are evaluable on a searchable column: the matcher
+    // builds the same equality indicator and, for '<>', flips it. Ordered
+    // comparisons (< <= > >=) still need a range encoding and are not yet
+    // evaluated.
+    if (node.op() != CompareOp::kEq && node.op() != CompareOp::kNe) {
       return absl::UnimplementedError(absl::StrCat(
           "operator ", ToString(node.op()),
-          " is parsed but not yet evaluated; only '=' is supported"));
+          " is parsed but not yet evaluated; only '=' and '<>' are supported"));
     }
     // A template reaching the plan builder must be parameterized. An inline
     // literal is the secret value; the client strips it before sending, so its

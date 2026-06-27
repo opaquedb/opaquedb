@@ -186,20 +186,39 @@ private:
   std::unique_ptr<Predicate> right_;
 };
 
+// One ORDER BY term: a column to sort by and the direction. ORDER BY is applied
+// by the client over the decoded result rows, not by the server, so it carries
+// only a public column name and direction. The column must appear in the
+// returned payload (the primary key is not returned, so it cannot be ordered
+// on).
+struct OrderByItem {
+  std::string column;
+  bool descending = false; // ASC by default
+};
+
 // A parsed SELECT statement. When select_all is true (SELECT *), projection is
 // empty and means every column; the planner expands it against the schema.
 //
-// limit and offset are the optional LIMIT/OFFSET clause. They are public (part
-// of the template), not secret. Unset limit means the default of 1, the
-// single-match behavior. offset counts result buckets, not rows: see the
-// bucketed multi-result design in the reference backend.
+// where may be null: a SELECT with no WHERE is a full table scan, served by the
+// plaintext Scan path rather than the encrypted matcher (there is no secret to
+// hide when no value is matched).
+//
+// distinct, order_by, limit, and offset are public presentation controls
+// applied by the client over the decoded rows, not by the server. They are part
+// of the template, never secret. Unset limit means the default
+// (kDefaultSelectLimit); offset counts result rows.
 struct SelectStatement {
   std::vector<std::string> projection; // columns to return, in order
-  bool select_all = false;             // SELECT *
+  // Display name per projected column, parallel to projection. Holds the alias
+  // when the column used AS, otherwise the column name. Empty when select_all.
+  std::vector<std::string> projection_aliases;
+  bool select_all = false; // SELECT *
+  bool distinct = false;   // SELECT DISTINCT
   bool count_star = false; // SELECT COUNT(*): return the match count
   std::string table;
-  std::unique_ptr<Predicate> where;
-  std::optional<std::uint64_t> limit;  // LIMIT n; unset means default 1
+  std::unique_ptr<Predicate> where; // null means a full scan (no WHERE)
+  std::vector<OrderByItem> order_by;
+  std::optional<std::uint64_t> limit;  // LIMIT n; unset means default
   std::optional<std::uint64_t> offset; // OFFSET m; unset means 0
 };
 

@@ -174,6 +174,7 @@ TEST(ReferenceBackend, RegistersWithEqualityCapability) {
     if (caps.name == "reference") {
       found = true;
       EXPECT_TRUE(caps.Supports(Op::kEq));
+      EXPECT_TRUE(caps.Supports(Op::kNe));
       EXPECT_FALSE(caps.Supports(Op::kRange));
       EXPECT_FALSE(caps.supports_batch);
     }
@@ -232,6 +233,51 @@ TEST(ReferenceBackend, AbsentKeyReturnsZeroPayload) {
   ASSERT_TRUE(partials.ok());
   std::optional<std::vector<std::uint8_t>> got = fx.DecodeResult(*partials);
   EXPECT_FALSE(got.has_value()) << "no row should match -> empty result";
+}
+
+TEST(ReferenceBackend, InequalityExcludesTheMatchAndReturnsTheOther) {
+  // '<>' flips the equality indicator: a row matches when its key differs from
+  // the operand. With just two keys {42, 5}, '<> 42' matches exactly the key-5
+  // row (one match, so no bucket collision) and '<> 5' matches exactly the
+  // key-42 row. This isolates the flip from the multi-row bucket spread (rows
+  // sharing the result spread by Mix(key) and can collide, the same behavior as
+  // any multi-row result).
+  Fixture fx = Fixture::Make();
+  std::unique_ptr<PirBackend> backend = MakeBackend(fx.ctx);
+  auto material = fx.keyring.SerializePublic();
+  ASSERT_TRUE(material.ok());
+  auto eval = backend->load_keys(*material);
+  ASSERT_TRUE(eval.ok());
+
+  const std::vector<std::uint64_t> ks = {42, 5};
+  KeyColumn keys = fx.BuildKeys(ks);
+  PayloadColumns payload = fx.BuildPayload(ks);
+  constexpr std::uint32_t kBuckets = 16;
+
+  auto run = [&](std::uint64_t value) -> Fixture::Decoded {
+    EncryptedQuery query = fx.BuildQuery(value, kBuckets);
+    query.op = Op::kNe;
+    auto partials = backend->evaluate(**eval, query, keys, payload);
+    EXPECT_TRUE(partials.ok()) << partials.status().message();
+    std::vector<std::vector<seal::Ciphertext>> shards;
+    shards.push_back(*partials);
+    auto combined = backend->combine(**eval, shards);
+    EXPECT_TRUE(combined.ok()) << combined.status().message();
+    return fx.DecodeBuckets(*combined, kBuckets, /*offset=*/0,
+                            /*limit=*/kBuckets);
+  };
+
+  Fixture::Decoded not42 = run(42);
+  EXPECT_EQ(not42.collided, 0u);
+  ASSERT_EQ(not42.rows.size(), 1u);
+  EXPECT_EQ(not42.rows[0], MakePayload(5, 1))
+      << "k <> 42 returns the key-5 row";
+
+  Fixture::Decoded not5 = run(5);
+  EXPECT_EQ(not5.collided, 0u);
+  ASSERT_EQ(not5.rows.size(), 1u);
+  EXPECT_EQ(not5.rows[0], MakePayload(42, 0))
+      << "k <> 5 returns the key-42 row";
 }
 
 TEST(ReferenceBackend, CombineSumsAcrossShards) {

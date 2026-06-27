@@ -68,6 +68,12 @@ target_link_libraries(catalog_test PRIVATE opaquedb_storage opaquedb_core
 add_opaquedb_test(sql_test sql_test.cpp)
 target_link_libraries(sql_test PRIVATE opaquedb_sql)
 
+# Client-side result presentation (table rendering, DISTINCT/ORDER BY/projection
+# over decoded rows). Pure, no matcher, so it stays in the fast tier.
+add_opaquedb_test(cli_render_test cli_render_test.cpp)
+target_link_libraries(cli_render_test PRIVATE opaquedb_cli opaquedb_sql
+  opaquedb_core)
+
 add_opaquedb_test(planner_test planner_test.cpp)
 target_link_libraries(planner_test PRIVATE opaquedb_planner opaquedb_backend)
 

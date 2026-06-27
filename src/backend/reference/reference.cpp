@@ -79,7 +79,7 @@ BackendCapabilities ReferenceBackend::StaticCapabilities() {
   caps.scheme = Scheme::kBfv;
   caps.server_model = ServerModel::kSingleServer;
   caps.security = SecurityModel::kSemiHonest;
-  caps.operators = {Op::kEq};
+  caps.operators = {Op::kEq, Op::kNe};
   caps.privacy_modes = {Privacy::kQueryPrivate};
   caps.supports_batch = false;
   return caps;
@@ -112,9 +112,9 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
     return absl::InvalidArgumentError(
         "reference backend: eval context was not produced by load_keys");
   }
-  if (query.op != Op::kEq) {
+  if (query.op != Op::kEq && query.op != Op::kNe) {
     return absl::UnimplementedError(
-        absl::StrCat("reference backend supports only equality, got op ",
+        absl::StrCat("reference backend supports only '=' and '<>', got op ",
                      backend::ToString(query.op)));
   }
   if (keys.size() != payload.size()) {
@@ -311,12 +311,24 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
         // The indicator is final: no more ct*ct multiplies follow, so drop a
         // prime before the occupancy mask, the broadcast, and the block-sum.
         drop_one(sel);
-        // Keep the indicator at occupied block starts, then broadcast it across
-        // each block by a doubling prefix-sum. The window grows to exactly
-        // key_bits wide, and block starts are key_bits apart, so each slot's
-        // window holds exactly one start: no cross-block bleed, and no
-        // plaintext multiplies to spend noise.
+        // Keep the indicator at occupied block starts. After this mask sel is
+        // the match indicator (1 at an occupied start whose key equals an
+        // operand, else 0).
         ev.multiply_plain_inplace(sel, *start_pt);
+        // For '<>' invert the indicator at occupied starts: ne = 1 - eq. The
+        // mask is 0 off the starts, so negating and adding it back leaves
+        // 1 - eq at each occupied start and 0 elsewhere. This is plaintext
+        // arithmetic on a final ciphertext: no extra multiplicative depth, so
+        // '<>' costs exactly what '=' costs. (Empty padding blocks hold key 0
+        // but are not occupied starts, so they stay 0 and never match.)
+        if (query.op == Op::kNe) {
+          ev.negate_inplace(sel);
+          ev.add_plain_inplace(sel, *start_pt);
+        }
+        // Broadcast the indicator across each block by a doubling prefix-sum.
+        // The window grows to exactly key_bits wide, and block starts are
+        // key_bits apart, so each slot's window holds exactly one start: no
+        // cross-block bleed, and no plaintext multiplies to spend noise.
         for (int i = 0; i < levels; ++i) {
           seal::Ciphertext rot;
           ev.rotate_rows(sel, -(1 << i), gal, rot);

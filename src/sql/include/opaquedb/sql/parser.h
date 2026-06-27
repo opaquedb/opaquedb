@@ -18,8 +18,11 @@
 // parses without error.
 //
 // The grammar:
-//   statement  := SELECT columns FROM identifier WHERE predicate
-//   columns    := identifier (',' identifier)*
+//   statement  := SELECT [DISTINCT] projection FROM identifier
+//                 [WHERE predicate] [ORDER BY order_list] [LIMIT n] [OFFSET m]
+//   projection := '*' | COUNT '(' '*' ')' | proj_col (',' proj_col)*
+//   proj_col   := identifier [AS identifier]
+//   order_list := identifier [ASC | DESC] (',' identifier [ASC | DESC])*
 //   predicate  := or_term (OR or_term)*
 //   or_term    := and_term (AND and_term)*
 //   and_term   := identifier comparison
@@ -27,11 +30,19 @@
 //               | IN '(' parameter (',' parameter)* ')'
 //               | LIKE parameter
 //               | BETWEEN parameter AND parameter
-// The WHERE value is a bound parameter or an inline literal. A literal is the
-// secret value, so the client strips it before sending (see
-// PrepareClientQuery).
+// WHERE is optional: a SELECT with no WHERE is a full table scan. The WHERE
+// value is a bound parameter or an inline literal. A literal is the secret
+// value, so the client strips it before sending (see PrepareClientQuery).
+// DISTINCT, ORDER BY, LIMIT, and OFFSET are public and applied client-side over
+// the decoded rows.
 
 namespace opaquedb::sql {
+
+// The default LIMIT when a SELECT carries no LIMIT clause. Applied client-side
+// over the decoded rows. It is bounded by crypto.result_buckets (default 16):
+// a match query returns at most result_buckets clean rows per query, so a
+// default above that gains nothing without also raising result_buckets.
+inline constexpr std::uint64_t kDefaultSelectLimit = 10;
 
 absl::StatusOr<SelectStatement> Parse(std::string_view sql);
 

@@ -62,6 +62,10 @@ public:
                              const proto::DescribeRequest *request,
                              proto::DescribeReply *reply) override;
 
+  grpc::Status Scan(grpc::ServerContext *context,
+                    const proto::ScanRequest *request,
+                    proto::ScanReply *reply) override;
+
 private:
   // Returns a channel to a peer shard, creating it on first use and reusing it
   // afterwards. gRPC channels are thread-safe and meant to be long-lived;

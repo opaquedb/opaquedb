@@ -145,17 +145,23 @@ opaquedb load --schema examples/weather.sql --csv examples/weather.csv
 Then open the interactive shell and run private queries by any searchable
 column, the primary `KEY` or any `INDEX`:
 
+Statements end with a semicolon and may span lines. Up and down recall history
+(saved across sessions), tab completes keywords and known table and column
+names, `\d <table>` shows a schema, and `\timing` toggles query timing.
+
 ```console
 $ opaquedb repl
 OpaqueDB shell. \help for commands, \quit to exit.
-opaquedb(default)> SELECT city, temperature, conditions FROM weather WHERE id = 1
-city=Amsterdam temperature=18 conditions=Cloudy
-opaquedb(default)> SELECT city, temperature FROM weather WHERE country = "JP"
-city=Tokyo temperature=27
-opaquedb(default)> SELECT city, country FROM weather WHERE conditions = "Clear" LIMIT 5
-city=Tokyo country=JP
-city=Santiago country=CL
-opaquedb(default)> SELECT country FROM weather WHERE city = "Atlantis"
+opaquedb(default)> SELECT city, temperature, conditions FROM weather WHERE id = 1;
+ city      | temperature | conditions
+-----------+-------------+------------
+ Amsterdam | 18          | Cloudy
+opaquedb(default)> SELECT city, country FROM weather WHERE conditions = "Sunny";
+ city    | country
+---------+---------
+ Nairobi | KE
+ Cairo   | EG
+opaquedb(default)> SELECT country FROM weather WHERE city = "Atlantis";
 (no rows)
 opaquedb(default)> \quit
 ```
@@ -167,38 +173,37 @@ round trip as matching on the key.
 A one-shot query works the same way and prints the decoded row:
 
 ```console
-$ opaquedb query 'SELECT country, temperature, conditions FROM weather WHERE city = "Amsterdam"'
-country=NL temperature=18 conditions=Cloudy
+$ opaquedb query 'SELECT country, temperature FROM weather WHERE city = "Tokyo"'
+ country | temperature
+---------+-------------
+ JP      | 27
 ```
 
-`"Amsterdam"` is encrypted before it leaves the client. The node scans every
-row under encryption and returns only the encrypted match.
+`"Tokyo"` is encrypted before it leaves the client. The node scans every row
+under encryption and returns only the encrypted match.
 
 ### Multiple matches: LIMIT and OFFSET
 
-A searchable value can match many rows. The default is `LIMIT 1`, so a bare
-query returns a single row:
+A searchable value can match many rows. The default is `LIMIT 10`, so a bare
+query returns up to ten matching rows. Two cities share `conditions = "Sunny"`,
+and both come back:
 
 ```console
-$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE conditions = "Sunny"'
-city=Nairobi country=KE temperature=24
+$ opaquedb query 'SELECT city, country FROM weather WHERE conditions = "Sunny"'
+ city    | country
+---------+---------
+ Nairobi | KE
+ Cairo   | EG
 ```
 
-Add `LIMIT n` to get more. Two cities share `conditions = "Sunny"`, and both come
-back in one query:
-
-```console
-$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE conditions = "Sunny" LIMIT 5'
-city=Nairobi country=KE temperature=24
-city=Cairo country=EG temperature=33
-```
-
-`OFFSET m` pages through the matches; rows come back in a stable order across
-queries, so `LIMIT 1 OFFSET 1` returns the second match:
+`LIMIT n` caps the rows and `OFFSET m` pages through them; rows come back in a
+stable order across queries, so `LIMIT 1 OFFSET 1` returns the second match:
 
 ```console
 $ opaquedb query 'SELECT city, country FROM weather WHERE conditions = "Sunny" LIMIT 1 OFFSET 1'
-city=Cairo country=EG
+ city  | country
+-------+---------
+ Cairo | EG
 ```
 
 `LIMIT`/`OFFSET` are public (they are not secret, so they stay in the
@@ -209,26 +214,72 @@ and the encrypted result size does not grow with the limit. A single value can
 therefore return up to `result_buckets` rows in one round trip; raise
 `result_buckets` for more.
 
+### Scan, sort, and de-duplicate
+
+A `SELECT` with no `WHERE` reads the table directly. There is no value to match,
+so nothing is hidden and the rows come back in the clear (a plaintext scan, not
+the encrypted matcher). It still defaults to `LIMIT 10`:
+
+```console
+$ opaquedb query 'SELECT city, temperature FROM weather ORDER BY temperature DESC LIMIT 3'
+ city    | temperature
+---------+-------------
+ Cairo   | 33
+ Tokyo   | 27
+ Nairobi | 24
+```
+
+`ORDER BY col [ASC|DESC]`, `DISTINCT`, and column aliases (`col AS name`) are
+applied on the client over the rows it gets back:
+
+```console
+$ opaquedb query 'SELECT DISTINCT country FROM weather ORDER BY country LIMIT 4'
+ country
+---------
+ CA
+ CL
+ EG
+ GB
+```
+
+### Exclude a value: `<>`
+
+`WHERE col <> :v` (or `!=`) matches every row whose value differs. It costs the
+operator no more than `=` and hides the value the same way. The count is exact:
+
+```console
+$ opaquedb query 'SELECT COUNT(*) FROM weather WHERE conditions <> "Sunny"'
+7
+```
+
+Returning the rows themselves follows the same bucket rules as any multi-row
+result (see below): a `<>` usually matches many rows, so some can collide in a
+bucket and be dropped from the returned set. Raise `crypto.result_buckets` or
+page with `OFFSET` to recover them; the `COUNT(*)` stays exact regardless.
+
 ### Match a set of values: IN and OR
 
 `WHERE col IN (...)` and a same-column `OR` match several values on one column in
 a single query. Each value is encrypted separately, so the operator still learns
-nothing about any of them. Pair them with `LIMIT` to return more than the default
-one row:
+nothing about any of them:
 
 ```console
-$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE city IN ("Tokyo", "Cairo", "London") LIMIT 5'
-city=London country=GB temperature=11
-city=Tokyo country=JP temperature=27
-city=Cairo country=EG temperature=33
+$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE city IN ("Tokyo", "Cairo", "London")'
+ city   | country | temperature
+--------+---------+-------------
+ London | GB      | 11
+ Tokyo  | JP      | 27
+ Cairo  | EG      | 33
 ```
 
 A flat `OR` on the same column is the same union written differently:
 
 ```console
-$ opaquedb query 'SELECT city, temperature FROM weather WHERE city = "Tokyo" OR city = "Nairobi" LIMIT 5'
-city=Nairobi temperature=24
-city=Tokyo temperature=27
+$ opaquedb query 'SELECT city, temperature FROM weather WHERE city = "Tokyo" OR city = "Nairobi"'
+ city    | temperature
+---------+-------------
+ Nairobi | 24
+ Tokyo   | 27
 ```
 
 `IN` works on the key too, for example `WHERE id IN (1, 5, 9)`. Combining
@@ -248,12 +299,27 @@ $ opaquedb query 'SELECT COUNT(*) FROM weather WHERE conditions = "Sunny"'
 ## What it is not
 
 - Not a full SQL engine yet. The evaluated query matches one searchable column,
-  the primary `KEY` or any `INDEX`, with `=`, `IN (...)`, or a same-column `OR`,
-  optionally with `LIMIT`/`OFFSET` or `COUNT(*)`. Cross-column conditions
+  the primary `KEY` or any `INDEX`, with `=`, `<>` (`!=`), `IN (...)`, or a
+  same-column `OR`, optionally with `LIMIT`/`OFFSET` or `COUNT(*)`. A `SELECT`
+  with no `WHERE` is a plaintext full scan. Cross-column conditions
   (`col1 = a AND col2 = b`, or `OR` spanning two columns), `LIKE`, and ranges
-  parse but are not evaluated under encryption yet. Widening the set of operators
-  the engine can evaluate privately is active work, so expect more SQL support
-  over time; the [docs](https://docs.opaquedb.io) track what is supported.
+  (`<`, `>`, `BETWEEN`) parse but are not evaluated under encryption yet.
+  Widening the set of operators the engine can evaluate privately is active work,
+  so expect more SQL support over time; the [docs](https://docs.opaquedb.io)
+  track what is supported.
+- Some SQL runs on the client, not the server. `ORDER BY`, `DISTINCT`, column
+  aliases (`AS`), and the `LIMIT`/`OFFSET` window are applied by the client over
+  the rows the server returns, not pushed into the encrypted scan. So they sort
+  and de-duplicate only what came back, which for a matched query is at most
+  `crypto.result_buckets` rows per query, and for a scan is what the server
+  returned (it caps how many rows one scan reads). A bare `ORDER BY ... LIMIT 5`
+  over a table larger than that window is not a global top-5. This keeps the
+  server's job to the one thing it must do under encryption, the private match,
+  and leaves presentation to the client.
+- A no-`WHERE` scan is not private and is single-node only. With no value to
+  match there is nothing to hide, so the scan returns plaintext rows; do not read
+  it as a private query. It also runs on one node's shard, so a full scan against
+  a sharded cluster is rejected rather than returning a partial answer.
 - Not a way to skip work. PIR requires a full linear scan. Sharding improves
   latency and throughput, not total work.
 - Not anonymity. Authentication is access control: OpaqueDB hides the query
@@ -270,14 +336,19 @@ $ opaquedb query 'SELECT COUNT(*) FROM weather WHERE conditions = "Sunny"'
 
 - `CREATE TABLE` schemas with typed columns (int, real, text, json), one match
   `KEY`, and any number of secondary `INDEX` columns to search on
-- Private equality lookup over encrypted data via Microsoft SEAL (BFV), matching
-  on the key or any secondary index
+- Private equality (`=`) and inequality (`<>`) lookup over encrypted data via
+  Microsoft SEAL (BFV), matching on the key or any secondary index, with `<>`
+  costing the same as `=`
 - Match a set of values on one column with `IN (...)` or a same-column `OR`, each
   operand encrypted, with no added multiplicative depth
 - Private `SELECT COUNT(*)` that returns an exact match count and nothing else
-- Multi-row results with public `LIMIT`/`OFFSET`: a value matching many rows
-  returns them in one round trip, at a result size that does not grow with the
-  limit
+- Plaintext full scan for a `SELECT` with no `WHERE` (no value to hide), with
+  client-side `ORDER BY`, `DISTINCT`, and column aliases
+- Multi-row results with public `LIMIT`/`OFFSET` (default `LIMIT 10`): a value
+  matching many rows returns them in one round trip, at a result size that does
+  not grow with the limit
+- Interactive `repl` with persistent history, multi-line statements, tab
+  completion, aligned table output, and `\d`/`\timing`
 - Sharded cluster with etcd leader election, membership, and query fan-out
 - Versioned immutable epochs: write-ahead log, atomic publish, rollback
 - Token, mTLS, and no-auth modes with constant-time token comparison

@@ -90,6 +90,29 @@ public:
     std::vector<std::string> encrypted_results;
   };
 
+  // The largest number of rows a single Scan returns, whatever the request
+  // asks. A scan is plaintext and a hostile or careless request could otherwise
+  // stream a whole table; the client pages with LIMIT/OFFSET for more.
+  static constexpr std::uint64_t kScanRowCap = 10000;
+
+  struct ScanResult {
+    // Payload records in storage order, capped at min(max_rows, kScanRowCap).
+    std::vector<std::vector<std::uint8_t>> rows;
+    // The table's true row count, before any cap, for an exact no-WHERE
+    // COUNT(*).
+    std::uint64_t total_rows = 0;
+  };
+
+  // Reads rows of a table's current epoch for a SELECT with no WHERE clause.
+  // Returns up to min(max_rows, kScanRowCap) payload records plus the table's
+  // true row count. This is a plaintext read on this node's shard alone; the
+  // gRPC adapter rejects a scan when the node has shard peers, since a sharded
+  // full scan must fan out (a tracked follow-up). database empty means
+  // "default".
+  absl::StatusOr<ScanResult> Scan(const std::string &database,
+                                  const std::string &table,
+                                  std::uint64_t max_rows);
+
   // Runs one private query against the current epoch on this node alone:
   // evaluate this node's segment then combine. The table comes from the SQL;
   // database selects which database holds it (empty means "default").
