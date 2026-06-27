@@ -86,6 +86,13 @@ evaluation with no extra encrypted multiplies. Because data is sharded by the
 primary key, an index query simply fans out to every shard and sums the
 partials, the same path a key query takes.
 
+`IN (...)` and a same-column `OR` (`city = "Tokyo" OR city = "Cairo"`) match a
+set of values on one column. The client encrypts one operand per value, the
+server builds one equality indicator per operand and sums them. A key equals at
+most one listed value, so the indicators are disjoint and the sum is their union.
+This adds one square plus AND-tree per extra value, not a deeper circuit, so the
+multiplicative depth stays the same as a single equality.
+
 ## Quickstart
 
 Build the binary (see [Building](#building)), then declare a table, load a CSV,
@@ -203,15 +210,54 @@ and the encrypted result size does not grow with the limit. A single value can
 therefore return up to `result_buckets` rows in one round trip; raise
 `result_buckets` for more.
 
+### Match a set of values: IN and OR
+
+`WHERE col IN (...)` and a same-column `OR` match several values on one column in
+a single query. Each value is encrypted separately, so the operator still learns
+nothing about any of them. Pair them with `LIMIT` to return more than the default
+one row:
+
+```console
+$ opaquedb query 'SELECT city, country, temperature FROM weather WHERE city IN ("Tokyo", "Cairo", "London") LIMIT 5' \
+    --schema examples/weather.sql
+city=London country=GB temperature=11
+city=Tokyo country=JP temperature=27
+city=Cairo country=EG temperature=33
+```
+
+A flat `OR` on the same column is the same union written differently:
+
+```console
+$ opaquedb query 'SELECT city, temperature FROM weather WHERE city = "Tokyo" OR city = "Nairobi" LIMIT 5' \
+    --schema examples/weather.sql
+city=Nairobi temperature=24
+city=Tokyo temperature=27
+```
+
+`IN` works on the key too, for example `WHERE id IN (1, 5, 9)`. Combining
+conditions across different columns (`col1 = a AND col2 = b`, or `OR` spanning
+two columns) is not evaluated yet.
+
+### Count matches privately
+
+`SELECT COUNT(*)` returns the number of matching rows as a single number. The
+count is exact and the operator still never sees the value:
+
+```console
+$ opaquedb query 'SELECT COUNT(*) FROM weather WHERE conditions = "Sunny"' \
+    --schema examples/weather.sql
+2
+```
+
 ## What it is not
 
-- Not a full SQL engine yet. Today the evaluated query is
-  `SELECT <cols> FROM <table> WHERE <col> = :param`, where `<col>` is the primary
-  `KEY` or any `INDEX` column. One condition per query: other operators (IN,
-  LIKE, ranges) and combining conditions with AND/OR already parse but are not
-  evaluated under encryption yet. Widening the set of operators the engine can
-  evaluate privately is active work, so expect more SQL support over time; the
-  [docs](https://docs.opaquedb.io) track what is supported.
+- Not a full SQL engine yet. The evaluated query matches one searchable column,
+  the primary `KEY` or any `INDEX`, with `=`, `IN (...)`, or a same-column `OR`,
+  optionally with `LIMIT`/`OFFSET` or `COUNT(*)`. Cross-column conditions
+  (`col1 = a AND col2 = b`, or `OR` spanning two columns), `LIKE`, and ranges
+  parse but are not evaluated under encryption yet. Widening the set of operators
+  the engine can evaluate privately is active work, so expect more SQL support
+  over time; the [docs](https://docs.opaquedb.io) track what is supported.
 - Not a way to skip work. PIR requires a full linear scan. Sharding improves
   latency and throughput, not total work.
 - Not anonymity. Authentication is access control: OpaqueDB hides the query
@@ -230,6 +276,9 @@ therefore return up to `result_buckets` rows in one round trip; raise
   and any number of secondary `INDEX` columns to search on
 - Private equality lookup over encrypted data via Microsoft SEAL (BFV), matching
   on the key or any secondary index
+- Match a set of values on one column with `IN (...)` or a same-column `OR`, each
+  operand encrypted, with no added multiplicative depth
+- Private `SELECT COUNT(*)` that returns an exact match count and nothing else
 - Multi-row results with public `LIMIT`/`OFFSET`: a value matching many rows
   returns them in one round trip, at a result size that does not grow with the
   limit
