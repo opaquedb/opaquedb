@@ -307,7 +307,8 @@ NodeServer::ClusterView NodeServer::ClusterViewCached() {
         view.peers.push_back(node.address);
     }
   }
-  if (absl::StatusOr<std::uint64_t> epoch = cluster_->CurrentEpoch(); epoch.ok())
+  if (absl::StatusOr<std::uint64_t> epoch = cluster_->CurrentEpoch();
+      epoch.ok())
     view.epoch = *epoch;
 
   std::lock_guard<std::mutex> lock(cluster_cache_mu_);

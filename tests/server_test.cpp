@@ -149,12 +149,12 @@ TEST_F(ServerEndToEnd, InListAndCountStar) {
   EXPECT_EQ(got, (std::vector<std::string>{"value-2", "value-5"}));
 
   // COUNT(*) over the IN list is exactly 2; absent key 0; unique key 1.
-  auto two =
-      (*client)->QueryCount("c1", "SELECT COUNT(*) FROM t WHERE k IN (2, 5)", 0);
+  auto two = (*client)->QueryCount(
+      "c1", "SELECT COUNT(*) FROM t WHERE k IN (2, 5)", 0);
   ASSERT_TRUE(two.ok()) << two.status().message();
   EXPECT_EQ(*two, 2u);
-  auto none = (*client)->QueryCount(
-      "c1", "SELECT COUNT(*) FROM t WHERE k = :k", 1000);
+  auto none =
+      (*client)->QueryCount("c1", "SELECT COUNT(*) FROM t WHERE k = :k", 1000);
   ASSERT_TRUE(none.ok()) << none.status().message();
   EXPECT_EQ(*none, 0u);
   auto one =

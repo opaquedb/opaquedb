@@ -248,15 +248,14 @@ absl::StatusOr<Engine::ShardResult> Engine::EvaluateShard(
 
   // Deserialize and validate the encrypted operand(s) against the context. Each
   // is a fresh top-level encryption of one lookup value, bit-expanded and tiled
-  // across slots. A point query carries one; IN / same-column OR carries one per
-  // listed value. The plan fixes how many to expect (from the public template),
-  // capped so a hostile template cannot drive unbounded FHE work.
+  // across slots. A point query carries one; IN / same-column OR carries one
+  // per listed value. The plan fixes how many to expect (from the public
+  // template), capped so a hostile template cannot drive unbounded FHE work.
   constexpr std::size_t kMaxOperands = 64;
   if (plan->match_operands == 0 || plan->match_operands > kMaxOperands) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("query has ", plan->match_operands,
-                     " match operands, supported range is [1, ", kMaxOperands,
-                     "]"));
+    return absl::InvalidArgumentError(absl::StrCat(
+        "query has ", plan->match_operands,
+        " match operands, supported range is [1, ", kMaxOperands, "]"));
   }
   absl::StatusOr<std::vector<seal::Ciphertext>> operands =
       crypto::DeserializeCiphertexts(

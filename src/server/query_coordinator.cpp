@@ -39,8 +39,9 @@ absl::StatusOr<Engine::QueryResult> QueryCoordinator::Execute(
 
   absl::StatusOr<Engine::ShardResult> local = absl::UnknownError("unset");
   std::thread local_thread([&]() {
-    local = engine_->EvaluateShard(client_id, database, sql_template,
-                                   encrypted_param, backend_hint, epoch_version_);
+    local =
+        engine_->EvaluateShard(client_id, database, sql_template,
+                               encrypted_param, backend_hint, epoch_version_);
   });
 
   std::vector<std::vector<std::string>> peer_partials(npeers);

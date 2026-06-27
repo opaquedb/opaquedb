@@ -195,8 +195,8 @@ TEST(Parser, PrepareClientQueryLiftsInListAndCountStar) {
   using opaquedb::sql::PrepareClientQuery;
   // An IN list lifts every literal in order, rewriting to :v0, :v1, ... so the
   // server template parses back to the same shape and plans.
-  auto p = PrepareClientQuery(
-      "SELECT city FROM weather WHERE id IN (17, 42, 99)");
+  auto p =
+      PrepareClientQuery("SELECT city FROM weather WHERE id IN (17, 42, 99)");
   ASSERT_TRUE(p.ok()) << p.status().message();
   ASSERT_EQ(p->literals.size(), 3u);
   EXPECT_EQ(std::get<std::int64_t>(p->literals[0]), 17);

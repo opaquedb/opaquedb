@@ -196,7 +196,7 @@ private:
 struct SelectStatement {
   std::vector<std::string> projection; // columns to return, in order
   bool select_all = false;             // SELECT *
-  bool count_star = false;             // SELECT COUNT(*): return the match count
+  bool count_star = false; // SELECT COUNT(*): return the match count
   std::string table;
   std::unique_ptr<Predicate> where;
   std::optional<std::uint64_t> limit;  // LIMIT n; unset means default 1

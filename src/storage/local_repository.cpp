@@ -266,9 +266,8 @@ absl::Status LocalEpochRepository::Prune(std::uint64_t keep) {
     const std::string dir = EpochDir((*versions)[i]);
     fs::remove_all(dir, ec);
     if (ec) {
-      return absl::InternalError(absl::StrCat("cannot prune epoch ",
-                                              (*versions)[i], ": ",
-                                              ec.message()));
+      return absl::InternalError(absl::StrCat(
+          "cannot prune epoch ", (*versions)[i], ": ", ec.message()));
     }
   }
   return absl::OkStatus();

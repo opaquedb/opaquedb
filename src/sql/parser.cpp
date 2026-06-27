@@ -319,7 +319,8 @@ absl::StatusOr<PreparedQuery> PrepareClientQuery(std::string_view sql) {
 
   // Literals can appear only as match values (an equality value or the entries
   // of an IN list), so every literal token is a value to lift out, in order.
-  // The number after LIMIT or OFFSET is a public bound, not a value, so skip it.
+  // The number after LIMIT or OFFSET is a public bound, not a value, so skip
+  // it.
   std::vector<const Token *> literals;
   TokenType prev = TokenType::kEnd;
   for (const Token &tok : *tokens) {

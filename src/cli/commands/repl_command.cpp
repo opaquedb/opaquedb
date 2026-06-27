@@ -219,9 +219,9 @@ void ReplCommand::Register(CLI::App &parent, const GlobalOptions &globals,
 
       // COUNT(*) renders a single number from the encrypted match count.
       if (count_star) {
-        absl::StatusOr<std::uint64_t> n = (*client)->QueryCount(
-            client_id_, std::string(trimmed), /*value=*/0,
-            /*backend_hint=*/"", database);
+        absl::StatusOr<std::uint64_t> n =
+            (*client)->QueryCount(client_id_, std::string(trimmed), /*value=*/0,
+                                  /*backend_hint=*/"", database);
         if (!n.ok()) {
           std::cout << "error: " << n.status().message() << "\n";
           continue;

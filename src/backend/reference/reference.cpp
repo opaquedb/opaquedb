@@ -279,9 +279,9 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
         if (!start_pt.ok())
           return start_pt.status();
 
-        // The per-row equality indicator for one operand: eq = 1 - (op - key)^2,
-        // AND-reduced across each block so a block is 1 only when every bit
-        // matches.
+        // The per-row equality indicator for one operand: eq = 1 - (op -
+        // key)^2, AND-reduced across each block so a block is 1 only when every
+        // bit matches.
         auto equality_indicator =
             [&](const seal::Ciphertext &operand) -> seal::Ciphertext {
           seal::Ciphertext s = operand;

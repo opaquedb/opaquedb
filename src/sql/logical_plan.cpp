@@ -65,8 +65,8 @@ private:
 // Walks the WHERE predicate and fills a plan builder. A single equality, an IN
 // list, or an OR of same-column equalities against bound parameters is
 // executable; every other node type reports a clear UNIMPLEMENTED so the caller
-// knows the statement parsed but cannot yet run. This is the planner-side use of
-// the visitor pattern.
+// knows the statement parsed but cannot yet run. This is the planner-side use
+// of the visitor pattern.
 class PlanningVisitor : public PredicateVisitor {
 public:
   explicit PlanningVisitor(LogicalPlanBuilder &builder) : builder_(builder) {}
