@@ -122,10 +122,15 @@ services:
     volumes:
       - data3:/var/lib/opaquedb
 
-  # A throwaway client container for the dev query subcommand.
+  # A throwaway client container for the dev query subcommand. This demo runs on
+  # a private Docker network with no client TLS, so the client channel is
+  # plaintext; a real client sets client.ca_cert (and client.tls_cert/tls_key
+  # for mutual TLS) instead of client.allow_insecure.
   tools:
     image: opaquedb:latest
     profiles: ["tools"]
+    environment:
+      OPAQUEDB_CLIENT_ALLOW_INSECURE: "true"
     entrypoint: ["/usr/bin/opaquedb"]
 
 volumes:

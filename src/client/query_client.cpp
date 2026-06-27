@@ -1,7 +1,10 @@
 #include "opaquedb/client/query_client.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -24,7 +27,55 @@ grpc::ChannelArguments ChannelArgs(const config::Config &cfg) {
       std::min<std::uint64_t>(cfg.server.max_message_bytes, 2147483647ULL));
   args.SetMaxReceiveMessageSize(max);
   args.SetMaxSendMessageSize(max);
+  // When dialing by IP or loopback the certificate host name will not match the
+  // target, so let the operator override the name the client verifies against.
+  if (!cfg.client.server_name.empty())
+    args.SetSslTargetNameOverride(cfg.client.server_name);
   return args;
+}
+
+absl::StatusOr<std::string> ReadFile(const std::string &path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in)
+    return absl::NotFoundError(absl::StrCat("cannot read '", path, "'"));
+  std::ostringstream out;
+  out << in.rdbuf();
+  return out.str();
+}
+
+// Channel credentials for the client, chosen by the [client] config. mTLS
+// (client cert + key + CA) presents a certificate and verifies the server;
+// server-auth TLS (CA only) verifies the server; allow_insecure permits a
+// plaintext channel for local development. With none of these set the client
+// fails closed rather than sending a bearer token over an unauthenticated
+// channel.
+absl::StatusOr<std::shared_ptr<grpc::ChannelCredentials>>
+MakeClientCredentials(const config::ClientConfig &client) {
+  const bool have_client_cert =
+      !client.tls_cert.empty() && !client.tls_key.empty();
+  if (!client.ca_cert.empty()) {
+    grpc::SslCredentialsOptions opts;
+    absl::StatusOr<std::string> ca = ReadFile(client.ca_cert);
+    if (!ca.ok())
+      return ca.status();
+    opts.pem_root_certs = *ca;
+    if (have_client_cert) {
+      absl::StatusOr<std::string> cert = ReadFile(client.tls_cert);
+      if (!cert.ok())
+        return cert.status();
+      absl::StatusOr<std::string> key = ReadFile(client.tls_key);
+      if (!key.ok())
+        return key.status();
+      opts.pem_cert_chain = *cert;
+      opts.pem_private_key = *key;
+    }
+    return grpc::SslCredentials(opts);
+  }
+  if (client.allow_insecure)
+    return grpc::InsecureChannelCredentials();
+  return absl::FailedPreconditionError(
+      "client transport is not configured: set client.ca_cert to verify the "
+      "server over TLS, or client.allow_insecure = true for local development");
 }
 
 absl::Status FromGrpc(const grpc::Status &s) {
@@ -49,8 +100,11 @@ QueryClient::Create(const config::Config &cfg, const std::string &target,
       *c, core::RequiredGaloisSteps(static_cast<std::uint32_t>(c->slot_count()),
                                     cfg.crypto.key_bits));
 
-  auto channel = grpc::CreateCustomChannel(
-      target, grpc::InsecureChannelCredentials(), ChannelArgs(cfg));
+  absl::StatusOr<std::shared_ptr<grpc::ChannelCredentials>> creds =
+      MakeClientCredentials(cfg.client);
+  if (!creds.ok())
+    return creds.status();
+  auto channel = grpc::CreateCustomChannel(target, *creds, ChannelArgs(cfg));
   auto stub = proto::OpaqueDB::NewStub(channel);
 
   return std::unique_ptr<QueryClient>(new QueryClient(
