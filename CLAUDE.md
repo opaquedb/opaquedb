@@ -334,18 +334,29 @@ prefix (torn-tail safe). The private header is `little_endian.h`, not `endian.h`
 
 **Auth, admin, and cluster security.** `Authenticator` (token/mtls/none) is
 gRPC-free; the gRPC edge extracts a bearer token and the mTLS peer identity into
-`auth::AuthInputs`; `RequestGate` runs auth then rate-limit on every query RPC.
-Tests that aren't about auth set `auth.mode=none`+`enable_insecure=true`. Do NOT
-link libsodium into the node: SEAL + gRPC's OpenSSL + libsodium triggers a
-symbol conflict that smashes the stack guard ("stack smashing detected" inside
+`auth::AuthInputs`; `RequestGate` runs auth then a PER-PRINCIPAL token-bucket
+rate limit (each principal its own bucket, a global backstop at 64x bounds the
+total; rate/burst from `server.rate_limit_per_second`/`_burst`) on every query
+RPC, and logs `audit:`-prefixed lines naming the principal. The gate holds the
+authenticator behind a mutex so `NodeServer::ReloadAuth` (SIGHUP, wired in the
+`run` command) hot-swaps a reloaded token file without a restart. mtls mode maps
+verified cert identities in `auth.admin_identities` to the Admin role, everyone
+else to Query. `token mint` (CLI) prints a `/dev/urandom` token line. Tests that
+aren't about auth set `auth.mode=none`+`enable_insecure=true`. Do NOT link
+libsodium into the node: SEAL + gRPC's OpenSSL + libsodium triggers a symbol
+conflict that smashes the stack guard ("stack smashing detected" inside
 unrelated SEAL code), so `auth` compares high-entropy bearer tokens in constant
-time with no crypto library. Cluster (node-to-node) is its own trust domain
+time with no crypto library. The CLIENT (`QueryClient`) fails closed: it needs
+`client.ca_cert` (verify server) or `client.tls_cert`/`tls_key` (mutual TLS) or
+an explicit `client.allow_insecure=true`, else `Create` refuses rather than send
+a token over plaintext; `client.server_name` overrides the cert host name when
+dialing by IP. Cluster (node-to-node) is its own trust domain
 (`cluster.tls_cert`/`tls_key`/`ca_cert`); peer channels present the cluster cert
 and verify peers against the cluster CA; a clustered node fails to start without
 cluster mTLS or server TLS unless `cluster.allow_insecure=true` (local dev only).
 `DeserializeCiphertexts` validates each client ciphertext's `parms_id` and size
-before use. See `SECURITY.md` (residual risk: the internal service still shares
-the public listener). `src/admin` holds the transport-agnostic `AdminService`
+before use. `src/admin`
+holds the transport-agnostic `AdminService`
 (publish/list/rollback/status/schema/principals) and `KeyringStore`;
 `AdminGrpcService` (in server, needs gRPC helpers, gated to the Admin role) and
 the in-process CLI facade share one publish path.
@@ -363,14 +374,22 @@ is not in the pinned baseline, so it is vendored as an overlay port in
 shard-map publish (a thread in production); `cluster.enabled` (default false)
 gates joining. Query path: `Engine::EvaluateShard` (per-shard, no combine) +
 `CombinePartials`; `ShardService` is the node-to-node Evaluate + RegisterKeys
-RPC; `QueryCoordinator` evaluates the local shard and fans out to peers
-concurrently (one worker thread per peer, its own shard on another), then
-combines; one slow shard no longer serializes behind the others. `QueryService`
-coordinates per request: peers come from etcd membership (`cluster.enabled`) or a
-static `SetQueryPeers` (tests), and `Register` forwards keys to every peer. Peer
-gRPC channels are pooled (cached by address, reused across queries instead of
-rebuilt), and the etcd membership/epoch the resolvers read is cached for a 1s TTL
-so a burst of queries does not hit etcd per request. Peers are reached at `server.advertise` (set it when binding
+RPC. The Internal service runs on its OWN listener when `cluster.listen` is set
+(the Elasticsearch transport-port model), isolated from clients on a private
+interface; that listener runs mutual TLS with the cluster CA, so only a
+cluster-CA-signed peer can reach it, and `ShardService` also rejects any call
+with no verified peer cert (`require_peer_cert`, on when the listener verifies
+client certs). When `cluster.listen` is empty the Internal service shares the
+client listener (single-node and tests). `QueryCoordinator` evaluates the local
+shard and fans out to peers concurrently (one worker thread per peer, its own
+shard on another), then combines; one slow shard no longer serializes behind the
+others. `QueryService` coordinates per request: peers come from etcd membership
+(`cluster.enabled`) or a static `SetQueryPeers` (tests), and `Register` forwards
+keys to every peer. Peer gRPC channels are pooled (cached by address, reused
+across queries instead of rebuilt), and the etcd membership/epoch the resolvers
+read is cached for a 1s TTL so a burst of queries does not hit etcd per request.
+Peers are reached at `cluster.advertise` (the node-to-node listener's address;
+falls back to `server.advertise` when the listener is shared; set it when binding
 a wildcard). Data must be sharded disjoint (consistent hash) for combine to be
 correct; replicating the full set would double-count. `load --shard-id N
 --shard-nodes a,b,c` loads a node's shard; `docker/docker-compose.yml` uses this.
