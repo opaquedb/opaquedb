@@ -94,9 +94,11 @@ void QueryCommand::Register(CLI::App &parent, const GlobalOptions &globals,
     // selected columns. If no schema file was given, fetch the table's schema
     // from the node so rows decode without --schema.
     std::vector<std::string> projection;
+    bool count_star = false;
     if (absl::StatusOr<sql::SelectStatement> stmt = sql::Parse(sql_);
         stmt.ok()) {
       projection = stmt->projection;
+      count_star = stmt->count_star;
       if (!have_schema) {
         if (absl::StatusOr<core::Schema> fetched =
                 (*client)->DescribeTable(database_, stmt->table);
@@ -105,6 +107,20 @@ void QueryCommand::Register(CLI::App &parent, const GlobalOptions &globals,
           have_schema = true;
         }
       }
+    }
+
+    // COUNT(*) returns a single number from the encrypted match count, not
+    // rows, so it has its own path and renders just the count.
+    if (count_star) {
+      absl::StatusOr<std::uint64_t> n =
+          (*client)->QueryCount(client_id_, sql_, value_, backend_, database_);
+      if (!n.ok()) {
+        spdlog::error("query: {}", n.status().message());
+        exit_code = 1;
+        return;
+      }
+      std::cout << *n << "\n";
+      return;
     }
 
     std::uint32_t collided = 0;
