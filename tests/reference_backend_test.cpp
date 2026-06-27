@@ -119,6 +119,16 @@ struct Fixture {
     return q;
   }
 
+  // Builds an IN / same-column OR query: a row matches if its key equals any of
+  // the values. The first value is the primary operand, the rest are extras.
+  EncryptedQuery BuildQueryIn(const std::vector<std::uint64_t> &values,
+                              std::uint32_t buckets) const {
+    EncryptedQuery q = BuildQuery(values.front(), buckets);
+    for (std::size_t i = 1; i < values.size(); ++i)
+      q.extra_operands.push_back(BuildQuery(values[i]).query);
+    return q;
+  }
+
   // The clean records and the collided-bucket count from a window of buckets.
   struct Decoded {
     std::vector<std::vector<std::uint8_t>> rows;
@@ -292,6 +302,36 @@ TEST(ReferenceBackend, MultiBucketReturnsAllRowsSharingAKey) {
   SortRows(want);
   SortRows(d.rows);
   EXPECT_EQ(d.rows, want) << "all rows with key 42 should be returned";
+}
+
+TEST(ReferenceBackend, InMatchesAnyOfSeveralValues) {
+  // WHERE key IN (17, 42): both rows come back, no collision, and a value not
+  // in the table contributes nothing.
+  Fixture fx = Fixture::Make();
+  std::unique_ptr<PirBackend> backend = MakeBackend(fx.ctx);
+  auto material = fx.keyring.SerializePublic();
+  ASSERT_TRUE(material.ok());
+  auto eval = backend->load_keys(*material);
+  ASSERT_TRUE(eval.ok());
+
+  KeyColumn keys = fx.BuildKeys(fx.keys); // {5, 17, 42, 99}
+  PayloadColumns payload = fx.BuildPayload(fx.keys);
+  const std::uint32_t buckets = 4;
+
+  EncryptedQuery query = fx.BuildQueryIn({17, 42, 123}, buckets);
+  auto partials = backend->evaluate(**eval, query, keys, payload);
+  ASSERT_TRUE(partials.ok()) << partials.status().message();
+  std::vector<std::vector<seal::Ciphertext>> shards = {*partials};
+  auto combined = backend->combine(**eval, shards);
+  ASSERT_TRUE(combined.ok()) << combined.status().message();
+
+  Fixture::Decoded d = fx.DecodeBuckets(*combined, buckets, 0, buckets);
+  EXPECT_EQ(d.collided, 0u);
+  std::vector<std::vector<std::uint8_t>> want = {MakePayload(17, 1),
+                                                 MakePayload(42, 2)};
+  SortRows(want);
+  SortRows(d.rows);
+  EXPECT_EQ(d.rows, want) << "IN should return every row whose key is listed";
 }
 
 TEST(ReferenceBackend, OffsetPagesThroughBucketsWithoutLossOrDuplication) {

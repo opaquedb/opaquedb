@@ -279,18 +279,34 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
         if (!start_pt.ok())
           return start_pt.status();
 
-        // sel = 1 - (query - key)^2, AND-reduced across each block.
-        seal::Ciphertext sel = query.query;
-        ev.sub_plain_inplace(sel, *key_pt);
-        ev.square_inplace(sel);
-        ev.relinearize_inplace(sel, relin);
-        ev.negate_inplace(sel);
-        ev.add_plain_inplace(sel, *ones_pt);
-        for (int i = 0; i < levels; ++i) {
-          seal::Ciphertext rot;
-          ev.rotate_rows(sel, 1 << i, gal, rot);
-          ev.multiply_inplace(sel, rot);
-          ev.relinearize_inplace(sel, relin);
+        // The per-row equality indicator for one operand: eq = 1 - (op - key)^2,
+        // AND-reduced across each block so a block is 1 only when every bit
+        // matches.
+        auto equality_indicator =
+            [&](const seal::Ciphertext &operand) -> seal::Ciphertext {
+          seal::Ciphertext s = operand;
+          ev.sub_plain_inplace(s, *key_pt);
+          ev.square_inplace(s);
+          ev.relinearize_inplace(s, relin);
+          ev.negate_inplace(s);
+          ev.add_plain_inplace(s, *ones_pt);
+          for (int i = 0; i < levels; ++i) {
+            seal::Ciphertext rot;
+            ev.rotate_rows(s, 1 << i, gal, rot);
+            ev.multiply_inplace(s, rot);
+            ev.relinearize_inplace(s, relin);
+          }
+          return s;
+        };
+
+        // sel is the union of the per-operand indicators. A key equals at most
+        // one operand, so the indicators are disjoint and summing them yields a
+        // 0/1 indicator without spending extra depth. One operand is a point
+        // query; several is IN / same-column OR.
+        seal::Ciphertext sel = equality_indicator(query.query);
+        for (const seal::Ciphertext &extra : query.extra_operands) {
+          seal::Ciphertext eq = equality_indicator(extra);
+          ev.add_inplace(sel, eq);
         }
         // The indicator is final: no more ct*ct multiplies follow, so drop a
         // prime before the occupancy mask, the broadcast, and the block-sum.
