@@ -33,8 +33,15 @@ public:
     if (absl::Status s = Expect(TokenType::kSelect); !s.ok())
       return s;
 
+    // SELECT DISTINCT removes duplicate rows; applied client-side after decode.
+    stmt.distinct = Match(TokenType::kDistinct);
+
     // SELECT COUNT(*) returns the encrypted match count, not rows.
     if (Match(TokenType::kCount)) {
+      if (stmt.distinct) {
+        return absl::InvalidArgumentError(
+            "DISTINCT with COUNT(*) is not supported");
+      }
       if (absl::Status s = Expect(TokenType::kLParen); !s.ok())
         return s;
       if (absl::Status s = Expect(TokenType::kStar); !s.ok())
@@ -46,10 +53,8 @@ public:
       // SELECT * returns every column; the planner expands it.
       stmt.select_all = true;
     } else {
-      absl::StatusOr<std::vector<std::string>> cols = ParseColumns();
-      if (!cols.ok())
-        return cols.status();
-      stmt.projection = *std::move(cols);
+      if (absl::Status s = ParseColumns(stmt); !s.ok())
+        return s;
     }
 
     if (absl::Status s = Expect(TokenType::kFrom); !s.ok())
@@ -59,15 +64,25 @@ public:
       return table.status();
     stmt.table = *std::move(table);
 
-    if (absl::Status s = Expect(TokenType::kWhere); !s.ok())
-      return s;
-    absl::StatusOr<std::unique_ptr<Predicate>> where = ParsePredicate();
-    if (!where.ok())
-      return where.status();
-    stmt.where = *std::move(where);
+    // WHERE is optional. With no WHERE the statement is a full table scan, run
+    // by the plaintext Scan path; where stays null.
+    if (Match(TokenType::kWhere)) {
+      absl::StatusOr<std::unique_ptr<Predicate>> where = ParsePredicate();
+      if (!where.ok())
+        return where.status();
+      stmt.where = *std::move(where);
+    }
+
+    // Optional ORDER BY, applied client-side over the decoded rows.
+    if (Match(TokenType::kOrder)) {
+      if (absl::Status s = Expect(TokenType::kBy); !s.ok())
+        return s;
+      if (absl::Status s = ParseOrderBy(stmt); !s.ok())
+        return s;
+    }
 
     // Optional LIMIT then optional OFFSET. Both are public bounds on how many
-    // result buckets to return and from where; they are not secret values.
+    // result rows to return and from where; they are not secret values.
     if (Match(TokenType::kLimit)) {
       absl::StatusOr<std::uint64_t> n = ParseCount("LIMIT");
       if (!n.ok())
@@ -162,19 +177,43 @@ private:
     return Parameter{Advance().text, std::nullopt};
   }
 
-  absl::StatusOr<std::vector<std::string>> ParseColumns() {
-    std::vector<std::string> columns;
-    absl::StatusOr<std::string> first = ParseIdentifier("a column name");
-    if (!first.ok())
-      return first.status();
-    columns.push_back(*std::move(first));
-    while (Match(TokenType::kComma)) {
-      absl::StatusOr<std::string> next = ParseIdentifier("a column name");
-      if (!next.ok())
-        return next.status();
-      columns.push_back(*std::move(next));
-    }
-    return columns;
+  // Parses the projection list into stmt.projection (column names) and
+  // stmt.projection_aliases (the display name per column: the alias after AS,
+  // or the column name when there is no alias).
+  absl::Status ParseColumns(SelectStatement &stmt) {
+    do {
+      absl::StatusOr<std::string> col = ParseIdentifier("a column name");
+      if (!col.ok())
+        return col.status();
+      std::string display = *col;
+      if (Match(TokenType::kAs)) {
+        absl::StatusOr<std::string> alias = ParseIdentifier("an alias name");
+        if (!alias.ok())
+          return alias.status();
+        display = *std::move(alias);
+      }
+      stmt.projection.push_back(*std::move(col));
+      stmt.projection_aliases.push_back(std::move(display));
+    } while (Match(TokenType::kComma));
+    return absl::OkStatus();
+  }
+
+  // Parses one or more ORDER BY terms into stmt.order_by.
+  absl::Status ParseOrderBy(SelectStatement &stmt) {
+    do {
+      absl::StatusOr<std::string> col = ParseIdentifier("a column name");
+      if (!col.ok())
+        return col.status();
+      OrderByItem item;
+      item.column = *std::move(col);
+      if (Match(TokenType::kDesc)) {
+        item.descending = true;
+      } else {
+        Match(TokenType::kAsc); // ASC is the default; consume it if present
+      }
+      stmt.order_by.push_back(std::move(item));
+    } while (Match(TokenType::kComma));
+    return absl::OkStatus();
   }
 
   // predicate := or_term (OR or_term)*

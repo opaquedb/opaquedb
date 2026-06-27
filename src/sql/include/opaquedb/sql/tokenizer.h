@@ -34,6 +34,12 @@ enum class TokenType {
   kBetween,
   kLimit,
   kOffset,
+  kOrder,    // ORDER, only as ORDER BY
+  kBy,       // BY, follows ORDER
+  kAsc,      // ASC sort direction
+  kDesc,     // DESC sort direction
+  kDistinct, // SELECT DISTINCT
+  kAs,       // column alias: SELECT col AS name
   kCreate,
   kTable,
   kKey,

@@ -410,7 +410,6 @@ TEST(LogicalPlan, BuildsForSupportedEquality) {
 
 TEST(LogicalPlan, RejectsUnimplementedOperators) {
   const std::vector<std::string> cases = {
-      "SELECT a FROM t WHERE k <> :p",
       "SELECT a FROM t WHERE k < :p",
       "SELECT a FROM t WHERE name LIKE :p",
       "SELECT a FROM t WHERE k BETWEEN :lo AND :hi",
@@ -477,6 +476,56 @@ TEST(LogicalPlan, BuilderValidatesRequiredFields) {
   LogicalPlanBuilder full;
   full.SetTable("t").AddProjection("a").SetMatch("k", CompareOp::kEq, "p");
   EXPECT_TRUE(full.Build().ok());
+}
+
+TEST(Parser, AcceptsSelectWithNoWhereAsAScan) {
+  auto stmt = Parse("SELECT * FROM weather");
+  ASSERT_TRUE(stmt.ok()) << stmt.status().message();
+  EXPECT_EQ(stmt->table, "weather");
+  EXPECT_TRUE(stmt->select_all);
+  EXPECT_EQ(stmt->where, nullptr) << "no WHERE means a full scan";
+
+  auto cols = Parse("SELECT city, conditions FROM weather");
+  ASSERT_TRUE(cols.ok()) << cols.status().message();
+  EXPECT_EQ(cols->projection, (std::vector<std::string>{"city", "conditions"}));
+  EXPECT_EQ(cols->where, nullptr);
+
+  // A no-WHERE COUNT(*) parses too: it is the table's row count.
+  auto cnt = Parse("SELECT COUNT(*) FROM weather");
+  ASSERT_TRUE(cnt.ok()) << cnt.status().message();
+  EXPECT_TRUE(cnt->count_star);
+  EXPECT_EQ(cnt->where, nullptr);
+}
+
+TEST(Parser, ParsesDistinctOrderByAndAliases) {
+  auto stmt = Parse("SELECT DISTINCT city AS town, temperature FROM weather "
+                    "ORDER BY temperature DESC, city LIMIT 5 OFFSET 2");
+  ASSERT_TRUE(stmt.ok()) << stmt.status().message();
+  EXPECT_TRUE(stmt->distinct);
+  EXPECT_EQ(stmt->projection,
+            (std::vector<std::string>{"city", "temperature"}));
+  EXPECT_EQ(stmt->projection_aliases,
+            (std::vector<std::string>{"town", "temperature"}));
+  ASSERT_EQ(stmt->order_by.size(), 2u);
+  EXPECT_EQ(stmt->order_by[0].column, "temperature");
+  EXPECT_TRUE(stmt->order_by[0].descending);
+  EXPECT_EQ(stmt->order_by[1].column, "city");
+  EXPECT_FALSE(stmt->order_by[1].descending); // ASC default
+  EXPECT_EQ(stmt->limit, 5u);
+  EXPECT_EQ(stmt->offset, 2u);
+}
+
+TEST(LogicalPlan, AcceptsInequality) {
+  for (const char *sql :
+       {"SELECT a FROM t WHERE k <> :p", "SELECT a FROM t WHERE k != :p"}) {
+    auto stmt = Parse(sql);
+    ASSERT_TRUE(stmt.ok()) << sql << ": " << stmt.status().message();
+    auto plan = BuildLogicalPlan(*stmt);
+    ASSERT_TRUE(plan.ok()) << sql << ": " << plan.status().message();
+    EXPECT_EQ(plan->op, CompareOp::kNe) << sql;
+    EXPECT_EQ(plan->match_column, "k") << sql;
+    EXPECT_EQ(plan->match_operands, 1u) << sql;
+  }
 }
 
 } // namespace
