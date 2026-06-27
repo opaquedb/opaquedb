@@ -71,6 +71,7 @@ protected:
       cfg->server.listen = "127.0.0.1:0";
       cfg->auth.mode = opaquedb::config::AuthMode::kNone;
       cfg->auth.enable_insecure = true;
+      cfg->client.allow_insecure = true;
     }
     cfg_a_.node.data_dir = (root_ / "a").string();
     cfg_b_.node.data_dir = (root_ / "b").string();

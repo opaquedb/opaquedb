@@ -57,12 +57,24 @@ struct ClusterConfig {
   std::string etcd_client_key;
   std::string etcd_tls_name;
 
+  // The node-to-node (Internal) RPC runs on its own listener, separate from the
+  // client-facing one, so cluster traffic is isolated from clients (the
+  // Elasticsearch transport-port model). Empty shares the client listener, kept
+  // for single-node and test setups; a clustered deployment binds this to a
+  // private interface. advertise is the address peers dial; empty derives it
+  // from listen (wrong for a wildcard bind, so a clustered node sets it).
+  std::string listen;
+  std::string advertise;
+
   // mTLS for the node-to-node (Internal) RPC, which carries client ciphertexts
   // and keys between shards. These are SEPARATE from the client-facing auth
   // certs so the cluster has its own trust domain. A node presents tls_cert and
-  // verifies peers against ca_cert. A clustered node (enabled = true) must set
-  // these (or server TLS) or it fails to start; allow_insecure is the explicit,
-  // documented escape hatch for local development only.
+  // verifies peers against ca_cert, and the Internal listener requires and
+  // verifies a peer certificate (mutual TLS), so only a node holding a
+  // cluster-CA-signed certificate can call Evaluate or RegisterKeys. A
+  // clustered node (enabled = true) must set these (or server TLS) or it fails
+  // to start; allow_insecure is the explicit, documented escape hatch for local
+  // development only.
   std::string tls_cert;
   std::string tls_key;
   std::string ca_cert;
@@ -80,6 +92,28 @@ struct ServerConfig {
   // Required when auth.mode = mtls.
   std::string tls_cert;
   std::string tls_key;
+  // Token-bucket rate limit applied per authenticated principal: a flood from
+  // one principal cannot starve the others. rate is the steady refill in
+  // requests per second, burst the bucket capacity. A global limiter at
+  // burst * 64 bounds total admission as a backstop.
+  std::uint32_t rate_limit_per_second = 2000;
+  std::uint32_t rate_limit_burst = 2000;
+};
+
+// How a client connects to a node. The CLI and any application client read
+// this; a node ignores it. TLS is used when ca_cert is set (the client then
+// verifies the server certificate); tls_cert and tls_key add a client
+// certificate for mutual TLS (required when the server runs auth.mode = mtls).
+// server_name overrides the certificate host name when dialing by IP or
+// loopback. The client fails closed: with no TLS material and allow_insecure
+// false it refuses to connect rather than silently sending a bearer token over
+// a plaintext channel. Set allow_insecure for local development only.
+struct ClientConfig {
+  std::string ca_cert;
+  std::string tls_cert;
+  std::string tls_key;
+  std::string server_name;
+  bool allow_insecure = false;
 };
 
 // The single source of truth for the FHE parameter set. crypto reads these; it
@@ -142,6 +176,10 @@ struct AuthConfig {
   std::string token_file = "/etc/opaquedb/tokens";
   // Client CA for mtls.
   std::string ca_cert;
+  // In mtls mode, the verified client certificate identities granted the Admin
+  // role. Any other verified identity is a Query principal. Empty means every
+  // mTLS client is Query only.
+  std::vector<std::string> admin_identities;
 };
 
 struct BlobStoreConfig {
@@ -165,6 +203,7 @@ struct Config {
   NodeConfig node;
   ClusterConfig cluster;
   ServerConfig server;
+  ClientConfig client;
   CryptoConfig crypto;
   StorageConfig storage;
   AuthConfig auth;

@@ -1,6 +1,8 @@
 #include "repl_command.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -15,8 +17,6 @@
 #include "absl/strings/str_split.h"
 #include "absl/strings/strip.h"
 #include "opaquedb/client/query_client.h"
-#include "opaquedb/sql/ddl.h"
-#include "opaquedb/sql/parser.h"
 #include "opaquedb/storage/catalog.h"
 #include "replxx.hxx"
 #include "spdlog/spdlog.h"
@@ -31,16 +31,44 @@ std::string DialTarget(const std::string &listen) {
 
 void PrintHelp() {
   std::cout << "commands:\n"
-               "  <SELECT ...>        run a private query in the current "
-               "database\n"
+               "  <SELECT ...>;       run a query in the current database "
+               "(end with ';')\n"
                "  \\use <database>     switch the current database\n"
-               "  \\schema <file>      load a CREATE TABLE schema to decode "
-               "rows\n"
                "  \\tables             list tables in the current database\n"
+               "  \\d <table>          show a table's columns\n"
+               "  \\timing             toggle query timing on/off\n"
                "  \\help               show this help\n"
                "  \\quit               exit\n"
-               "queries may use an inline literal, e.g.\n"
-               "  SELECT temperature FROM weather WHERE city = \"London\"\n";
+               "statements may span lines and end with a semicolon, e.g.\n"
+               "  SELECT city, temperature FROM weather\n"
+               "    WHERE city = \"London\" ORDER BY temperature DESC;\n"
+               "a SELECT with no WHERE returns rows directly (a full scan).\n";
+}
+
+// The path of the persistent history file: $OPAQUEDB_HISTORY, else
+// $HOME/.opaquedb_history, else empty (history stays in-memory only).
+std::string HistoryPath() {
+  if (const char *h = std::getenv("OPAQUEDB_HISTORY"); h != nullptr && *h)
+    return h;
+  if (const char *home = std::getenv("HOME"); home != nullptr && *home)
+    return std::string(home) + "/.opaquedb_history";
+  return "";
+}
+
+// Prints a table's schema as a small table (column, type, encoding).
+void PrintDescribe(client::QueryClient &client, const std::string &database,
+                   const std::string &table) {
+  absl::StatusOr<core::Schema> schema = client.DescribeTable(database, table);
+  if (!schema.ok()) {
+    std::cout << "error: " << schema.status().message() << "\n";
+    return;
+  }
+  std::vector<std::vector<std::string>> rows;
+  for (const core::Column &col : schema->columns()) {
+    rows.push_back(
+        {col.name, core::ToString(col.type), core::ToString(col.encoding)});
+  }
+  std::cout << RenderTable({"column", "type", "encoding"}, rows);
 }
 
 } // namespace
@@ -54,8 +82,6 @@ void ReplCommand::Register(CLI::App &parent, const GlobalOptions &globals,
   repl->add_option("--token", token_, "Bearer token for token auth mode");
   repl->add_option("--database", database_, "Initial database")
       ->default_val("default");
-  repl->add_option("--schema", schema_,
-                   "CREATE TABLE schema file, to decode typed results");
   repl->callback([this, &globals, &exit_code]() {
     absl::StatusOr<config::Config> config = LoadConfig(globals);
     if (!config.ok()) {
@@ -63,26 +89,6 @@ void ReplCommand::Register(CLI::App &parent, const GlobalOptions &globals,
       exit_code = 1;
       return;
     }
-
-    core::Schema schema;
-    bool have_schema = false;
-    auto load_schema = [&](const std::string &path) -> bool {
-      absl::StatusOr<std::string> ddl = ReadFile(path);
-      if (!ddl.ok()) {
-        std::cout << "schema: " << ddl.status().message() << "\n";
-        return false;
-      }
-      absl::StatusOr<core::Schema> parsed = sql::ParseCreateTable(*ddl);
-      if (!parsed.ok()) {
-        std::cout << "schema: " << parsed.status().message() << "\n";
-        return false;
-      }
-      schema = *std::move(parsed);
-      have_schema = true;
-      return true;
-    };
-    if (!schema_.empty())
-      load_schema(schema_);
 
     const std::string target =
         target_.empty() ? DialTarget(config->server.listen) : target_;
@@ -100,144 +106,158 @@ void ReplCommand::Register(CLI::App &parent, const GlobalOptions &globals,
     }
 
     std::string database = database_;
+    bool timing = false;
     // Schemas fetched from the node, cached by "database.table", so rows decode
-    // and project without the user supplying a schema file.
+    // and project without a schema file. Also feeds tab completion.
     std::map<std::string, core::Schema> schema_cache;
 
-    // replxx gives line editing and history (up arrow recalls past lines) plus
-    // tab completion of keywords and meta-commands.
+    // replxx gives line editing, history (up/down recall), and tab completion.
     replxx::Replxx rx;
     rx.install_window_change_handler();
-    rx.set_completion_callback([](const std::string &context,
-                                  int &len) -> replxx::Replxx::completions_t {
-      static const std::vector<std::string> kCandidates = {
-          "SELECT", "FROM",     "WHERE",    "AND",    "OR",
-          "\\use",  "\\schema", "\\tables", "\\help", "\\quit"};
-      const std::size_t ws = context.find_last_of(" \t");
-      const std::string prefix =
-          context.substr(ws == std::string::npos ? 0 : ws + 1);
-      len = static_cast<int>(prefix.size());
-      replxx::Replxx::completions_t out;
-      for (const std::string &cand : kCandidates) {
-        if (cand.size() >= prefix.size() &&
-            strncasecmp(cand.c_str(), prefix.c_str(), prefix.size()) == 0)
-          out.emplace_back(cand);
+    rx.set_max_history_size(1000);
+    const std::string history_path = HistoryPath();
+    if (!history_path.empty())
+      rx.history_load(history_path);
+
+    // Completion offers SQL keywords, meta-commands, and the table and column
+    // names already learned (queried once, then cached) for the current
+    // database.
+    rx.set_completion_callback([&](const std::string &context,
+                                   int &len) -> replxx::Replxx::completions_t {
+      std::vector<std::string> candidates = {
+          "SELECT",   "DISTINCT", "FROM",   "WHERE",    "AND",   "OR",
+          "ORDER BY", "LIMIT",    "OFFSET", "COUNT(*)", "\\use", "\\tables",
+          "\\d",      "\\timing", "\\help", "\\quit"};
+      const std::string prefix = database + ".";
+      for (const auto &[key, schema] : schema_cache) {
+        if (key.compare(0, prefix.size(), prefix) != 0)
+          continue;
+        candidates.push_back(key.substr(prefix.size())); // table name
+        for (const core::Column &col : schema.columns())
+          candidates.push_back(col.name);
       }
+      const std::size_t ws = context.find_last_of(" \t");
+      const std::string word =
+          context.substr(ws == std::string::npos ? 0 : ws + 1);
+      len = static_cast<int>(word.size());
+      replxx::Replxx::completions_t out;
+      for (const std::string &cand : candidates)
+        if (cand.size() >= word.size() &&
+            strncasecmp(cand.c_str(), word.c_str(), word.size()) == 0)
+          out.emplace_back(cand);
       return out;
     });
     std::cout << "OpaqueDB shell. \\help for commands, \\quit to exit.\n";
 
+    std::string pending; // accumulated lines of a multi-line statement
     while (true) {
-      const std::string prompt = "opaquedb(" + database + ")> ";
+      const std::string prompt =
+          pending.empty() ? "opaquedb(" + database + ")> " : "       ...> ";
       const char *cline = rx.input(prompt);
       if (cline == nullptr)
         break; // EOF (Ctrl-D) or interrupt
-      std::string line(cline);
-      std::string_view trimmed = absl::StripAsciiWhitespace(line);
-      if (trimmed.empty())
-        continue;
-      rx.history_add(line);
+      const std::string line(cline);
 
-      if (trimmed.front() == '\\') {
-        const std::pair<std::string_view, std::string_view> parts =
-            absl::StrSplit(trimmed, absl::MaxSplits(' ', 1));
-        const std::string_view cmd = parts.first;
-        const std::string_view arg = absl::StripAsciiWhitespace(parts.second);
-        if (cmd == "\\quit" || cmd == "\\q") {
-          break;
-        } else if (cmd == "\\help" || cmd == "\\h") {
-          PrintHelp();
-        } else if (cmd == "\\use") {
-          if (arg.empty()) {
-            std::cout << "usage: \\use <database>\n";
-          } else {
-            // Validate against the catalog so switching to a database with no
-            // tables is reported rather than silently accepted. (Local catalog;
-            // the dev REPL is normally co-located with the node.)
-            storage::Catalog catalog(config->DatabasesDir());
-            absl::StatusOr<std::vector<std::string>> dbs =
-                catalog.ListDatabases();
-            if (dbs.ok() && std::find(dbs->begin(), dbs->end(),
-                                      std::string(arg)) == dbs->end()) {
-              std::cout << "error: no database '" << arg
-                        << "' (load a table into it first)\n";
+      // A meta-command is a single line beginning with '\', only at the start
+      // of a statement.
+      if (pending.empty()) {
+        const std::string_view trimmed = absl::StripAsciiWhitespace(line);
+        if (trimmed.empty())
+          continue;
+        if (trimmed.front() == '\\') {
+          rx.history_add(line);
+          const std::pair<std::string_view, std::string_view> parts =
+              absl::StrSplit(trimmed, absl::MaxSplits(' ', 1));
+          const std::string_view cmd = parts.first;
+          const std::string_view arg = absl::StripAsciiWhitespace(parts.second);
+          if (cmd == "\\quit" || cmd == "\\q") {
+            break;
+          } else if (cmd == "\\help" || cmd == "\\h") {
+            PrintHelp();
+          } else if (cmd == "\\timing") {
+            timing = !timing;
+            std::cout << "timing is " << (timing ? "on" : "off") << "\n";
+          } else if (cmd == "\\d") {
+            if (arg.empty())
+              std::cout << "usage: \\d <table>\n";
+            else
+              PrintDescribe(**client, database, std::string(arg));
+          } else if (cmd == "\\use") {
+            if (arg.empty()) {
+              std::cout << "usage: \\use <database>\n";
             } else {
-              database = std::string(arg);
+              // Validate against the local catalog so switching to a database
+              // with no tables is reported rather than silently accepted.
+              storage::Catalog catalog(config->DatabasesDir());
+              absl::StatusOr<std::vector<std::string>> dbs =
+                  catalog.ListDatabases();
+              if (dbs.ok() && std::find(dbs->begin(), dbs->end(),
+                                        std::string(arg)) == dbs->end()) {
+                std::cout << "error: no database '" << arg
+                          << "' (load a table into it first)\n";
+              } else {
+                database = std::string(arg);
+              }
             }
-          }
-        } else if (cmd == "\\schema") {
-          if (arg.empty())
-            std::cout << "usage: \\schema <file>\n";
-          else if (load_schema(std::string(arg)))
-            std::cout << "decoding rows with schema for table '"
-                      << schema.table() << "'\n";
-        } else if (cmd == "\\tables") {
-          // Tables in the current database, names only.
-          storage::Catalog catalog(config->DatabasesDir());
-          absl::StatusOr<std::vector<core::TableId>> ids = catalog.ListTables();
-          if (!ids.ok()) {
-            std::cout << ids.status().message() << "\n";
+          } else if (cmd == "\\tables") {
+            storage::Catalog catalog(config->DatabasesDir());
+            absl::StatusOr<std::vector<core::TableId>> ids =
+                catalog.ListTables();
+            if (!ids.ok()) {
+              std::cout << ids.status().message() << "\n";
+            } else {
+              bool any = false;
+              for (const core::TableId &id : *ids) {
+                if (id.database != database)
+                  continue;
+                std::cout << id.table << "\n";
+                any = true;
+              }
+              if (!any)
+                std::cout << "(no tables in '" << database << "')\n";
+            }
           } else {
-            bool any = false;
-            for (const core::TableId &id : *ids) {
-              if (id.database != database)
-                continue;
-              std::cout << id.table << "\n";
-              any = true;
-            }
-            if (!any)
-              std::cout << "(no tables in '" << database << "')\n";
+            std::cout << "unknown command '" << cmd
+                      << "'; \\help for the list\n";
           }
-        } else {
-          std::cout << "unknown command '" << cmd << "'; \\help for the list\n";
+          continue;
         }
-        continue;
       }
 
-      // Parse the projection and table so results show only the selected
-      // columns, and fetch (and cache) the table's schema to decode rows.
-      std::vector<std::string> projection;
-      const core::Schema *render_schema = have_schema ? &schema : nullptr;
-      if (absl::StatusOr<sql::SelectStatement> stmt =
-              sql::Parse(std::string(trimmed));
-          stmt.ok()) {
-        projection = stmt->projection;
-        const std::string key = database + "." + stmt->table;
-        auto it = schema_cache.find(key);
-        if (it == schema_cache.end()) {
-          if (absl::StatusOr<core::Schema> fetched =
-                  (*client)->DescribeTable(database, stmt->table);
-              fetched.ok()) {
-            it = schema_cache.emplace(key, *std::move(fetched)).first;
-          }
-        }
-        if (it != schema_cache.end())
-          render_schema = &it->second;
-      }
-
-      std::uint32_t collided = 0;
-      absl::StatusOr<std::vector<std::vector<std::uint8_t>>> rows =
-          (*client)->Query(client_id_, std::string(trimmed), /*value=*/0,
-                           /*backend_hint=*/"", database, &collided);
-      if (!rows.ok()) {
-        std::cout << "error: " << rows.status().message() << "\n";
+      // Accumulate into the pending statement. A blank line forces execution of
+      // what is buffered; otherwise a statement runs once it ends with ';'.
+      const bool blank = absl::StripAsciiWhitespace(line).empty();
+      if (!pending.empty())
+        pending += "\n";
+      pending += line;
+      const std::string_view ptrim = absl::StripAsciiWhitespace(pending);
+      if (ptrim.empty()) {
+        pending.clear();
         continue;
       }
-      if (rows->empty()) {
-        std::cout << "(no rows)\n";
-      }
-      for (const std::vector<std::uint8_t> &row : *rows) {
-        std::cout << (render_schema
-                          ? RenderWithSchema(*render_schema, row, projection)
-                          : RenderRaw(row))
-                  << "\n";
-      }
-      if (collided > 0) {
-        std::cout << "(" << collided
-                  << " bucket(s) dropped: same-key collision; raise "
-                     "crypto.result_buckets or page with OFFSET)\n";
+      if (ptrim.back() != ';' && !blank)
+        continue; // statement is not finished yet
+
+      const std::string statement(ptrim);
+      rx.history_add(pending);
+      pending.clear();
+
+      const auto start = std::chrono::steady_clock::now();
+      if (absl::Status s = RunSelect(**client, client_id_, statement,
+                                     /*value=*/0, /*backend=*/"", database,
+                                     std::cout, &schema_cache);
+          !s.ok()) {
+        std::cout << "error: " << s.message() << "\n";
+      } else if (timing) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - start)
+                            .count();
+        std::cout << "Time: " << ms << " ms\n";
       }
     }
+
+    if (!history_path.empty())
+      rx.history_save(history_path);
   });
 }
 

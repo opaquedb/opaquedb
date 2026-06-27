@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.24)
 # it into the binary so `opaquedb --version` matches the package version. Until
 # then this literal is the single source of truth.
 project(OpaqueDB
-  VERSION 0.3.0
+  VERSION 0.4.0
   DESCRIPTION "Distributed PIR database engine over homomorphically encrypted data"
   LANGUAGES CXX)
 
@@ -19,6 +19,7 @@ endif()
 
 option(OPAQUEDB_WERROR "Treat warnings as errors for first-party targets" OFF)
 option(OPAQUEDB_BUILD_TESTS "Build the test suite" ON)
+option(OPAQUEDB_COVERAGE "Instrument first-party targets for gcov coverage" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(OpaqueDBCompileOptions)

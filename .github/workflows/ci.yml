@@ -36,6 +36,13 @@ jobs:
   # build minutes on a branch that will fail the style check anyway. clang-tidy
   # is intentionally left out of CI: it re-analyzes every source on top of the
   # build and roughly doubled the job time. Run `make tidy` locally instead.
+  #
+  # Uses the release preset, not dev. dev links debug-SEAL where the matcher
+  # tests run 50-120s each (the full suite is over ten minutes); release links
+  # the optimized SEAL and runs the same suite in well under a minute, and it
+  # still keeps -Werror on (OPAQUEDB_WERROR is ON in the release preset), so the
+  # warning gate is not lost. The whole suite still runs, including the
+  # SEAL-heavy "slow"-labelled tests, just fast.
   build-and-test:
     name: build & test
     needs: format
@@ -90,10 +97,10 @@ jobs:
           restore-keys: vcpkg-${{ runner.os }}-
 
       - name: Configure
-        run: make configure
+        run: make configure PRESET=release
 
       - name: Build
-        run: make build
+        run: make build PRESET=release
 
       - name: Test
-        run: make test
+        run: make test PRESET=release

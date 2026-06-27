@@ -1,5 +1,6 @@
 #include "opaquedb/server/engine.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <optional>
 #include <span>
@@ -181,6 +182,37 @@ Engine::InsertRow(const std::string &database, const std::string &table,
   return InsertOutcome{result->epoch_version, result->row_count};
 }
 
+absl::StatusOr<Engine::ScanResult> Engine::Scan(const std::string &database,
+                                                const std::string &table,
+                                                std::uint64_t max_rows) {
+  if (table.empty()) {
+    return absl::InvalidArgumentError("scan: table is required");
+  }
+  core::TableId id{
+      database.empty() ? std::string(core::kDefaultDatabase) : database, table};
+  absl::StatusOr<storage::EpochRepository *> repo = resolve_repo_(id);
+  if (!repo.ok())
+    return repo.status();
+  absl::StatusOr<std::unique_ptr<storage::EpochReader>> reader =
+      (*repo)->OpenCurrent();
+  if (!reader.ok())
+    return reader.status();
+
+  ScanResult result;
+  result.total_rows = (*reader)->row_count();
+  const std::uint64_t want = std::min(max_rows, kScanRowCap);
+  const std::uint64_t take = std::min(want, result.total_rows);
+  result.rows.reserve(take);
+  for (std::uint64_t r = 0; r < take; ++r) {
+    absl::StatusOr<std::span<const std::uint8_t>> bytes =
+        (*reader)->PayloadRecord(r);
+    if (!bytes.ok())
+      return bytes.status();
+    result.rows.emplace_back(bytes->begin(), bytes->end());
+  }
+  return result;
+}
+
 absl::StatusOr<Engine::ShardResult> Engine::EvaluateShard(
     const std::string &client_id, const std::string &database,
     const std::string &sql_template, const std::string &encrypted_param,
@@ -246,20 +278,34 @@ absl::StatusOr<Engine::ShardResult> Engine::EvaluateShard(
   if (!eval.ok())
     return eval.status();
 
-  // Deserialize and validate the encrypted query against the context. It is a
-  // single ciphertext: the lookup value bit-expanded and tiled across slots.
-  absl::StatusOr<std::vector<seal::Ciphertext>> operand =
-      crypto::DeserializeCiphertexts(ctx_, encrypted_param, /*max_count=*/1);
-  if (!operand.ok())
-    return operand.status();
-  if (operand->size() != 1) {
+  // Deserialize and validate the encrypted operand(s) against the context. Each
+  // is a fresh top-level encryption of one lookup value, bit-expanded and tiled
+  // across slots. A point query carries one; IN / same-column OR carries one
+  // per listed value. The plan fixes how many to expect (from the public
+  // template), capped so a hostile template cannot drive unbounded FHE work.
+  constexpr std::size_t kMaxOperands = 64;
+  if (plan->match_operands == 0 || plan->match_operands > kMaxOperands) {
     return absl::InvalidArgumentError(absl::StrCat(
-        "encrypted query has ", operand->size(), " ciphertexts, expected 1"));
+        "query has ", plan->match_operands,
+        " match operands, supported range is [1, ", kMaxOperands, "]"));
+  }
+  absl::StatusOr<std::vector<seal::Ciphertext>> operands =
+      crypto::DeserializeCiphertexts(
+          ctx_, encrypted_param,
+          /*max_count=*/static_cast<std::uint32_t>(plan->match_operands));
+  if (!operands.ok())
+    return operands.status();
+  if (operands->size() != plan->match_operands) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("encrypted query has ", operands->size(),
+                     " ciphertexts, expected ", plan->match_operands));
   }
 
   backend::EncryptedQuery query;
   query.op = plan->op;
-  query.query = std::move((*operand)[0]);
+  query.query = std::move((*operands)[0]);
+  for (std::size_t i = 1; i < operands->size(); ++i)
+    query.extra_operands.push_back(std::move((*operands)[i]));
   // Always partition matches into result_buckets buckets, independent of the
   // query's LIMIT/OFFSET. The whole partition rides in one ciphertext at no
   // extra cost, so the client decodes every bucket and applies LIMIT/OFFSET as
@@ -322,8 +368,11 @@ absl::StatusOr<std::vector<std::string>> Engine::CombinePartials(
     std::vector<seal::Ciphertext> ciphers;
     ciphers.reserve(shard.size());
     for (const std::string &blob : shard) {
+      // Shard partials are server-produced and have been mod-switched down the
+      // modulus chain by the matcher, so they are not fresh top-level operands.
       absl::StatusOr<std::vector<seal::Ciphertext>> one =
-          crypto::DeserializeCiphertexts(ctx_, blob, /*max_count=*/1);
+          crypto::DeserializeCiphertexts(ctx_, blob, /*max_count=*/1,
+                                         /*require_top_level=*/false);
       if (!one.ok())
         return one.status();
       if (one->size() != 1) {

@@ -24,6 +24,7 @@ inline constexpr std::size_t kMaxIdentifierLength = 256;
 
 enum class TokenType {
   kSelect,
+  kCount, // COUNT, only as the aggregate COUNT(*)
   kFrom,
   kWhere,
   kAnd,
@@ -33,6 +34,12 @@ enum class TokenType {
   kBetween,
   kLimit,
   kOffset,
+  kOrder,    // ORDER, only as ORDER BY
+  kBy,       // BY, follows ORDER
+  kAsc,      // ASC sort direction
+  kDesc,     // DESC sort direction
+  kDistinct, // SELECT DISTINCT
+  kAs,       // column alias: SELECT col AS name
   kCreate,
   kTable,
   kKey,

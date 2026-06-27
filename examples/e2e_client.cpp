@@ -70,6 +70,9 @@ int main(int argc, char **argv) {
 
   Config
       cfg; // crypto and storage defaults, matching a node started the same way
+  // This example talks to a local dev node over a plaintext channel. A real
+  // client sets client.ca_cert (and client.tls_cert/tls_key for mutual TLS).
+  cfg.client.allow_insecure = true;
 
   Schema schema;
   bool have_schema = false;

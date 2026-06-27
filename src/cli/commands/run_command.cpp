@@ -13,10 +13,16 @@ namespace {
 
 // The running server, so the signal handler can ask it to shut down. A signal
 // handler may touch only async-signal-safe state, so it sets a flag and the
-// main thread does the shutdown.
+// main thread does the work (shutdown, or an auth reload on SIGHUP).
 std::atomic<bool> *g_stop_flag = nullptr;
+std::atomic<bool> *g_reload_flag = nullptr;
 
-void OnSignal(int /*signal*/) {
+void OnSignal(int signal) {
+  if (signal == SIGHUP) {
+    if (g_reload_flag != nullptr)
+      g_reload_flag->store(true);
+    return;
+  }
   if (g_stop_flag != nullptr)
     g_stop_flag->store(true);
 }
@@ -50,17 +56,26 @@ void RunCommand::Register(CLI::App &parent, const GlobalOptions &globals,
     spdlog::info("listening on {}", (*node)->listen_address());
 
     std::atomic<bool> stop{false};
+    std::atomic<bool> reload{false};
     g_stop_flag = &stop;
+    g_reload_flag = &reload;
     std::signal(SIGINT, OnSignal);
     std::signal(SIGTERM, OnSignal);
+    // SIGHUP reloads the token file so credentials rotate without a restart.
+    std::signal(SIGHUP, OnSignal);
 
-    // Wait for a stop signal, then drain.
+    // Wait for a stop signal, reloading auth whenever SIGHUP arrives.
     while (!stop.load()) {
+      if (reload.exchange(false)) {
+        if (absl::Status s = (*node)->ReloadAuth(); !s.ok())
+          spdlog::error("run: auth reload failed: {}", s.message());
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     spdlog::info("shutting down");
     (*node)->Shutdown();
     g_stop_flag = nullptr;
+    g_reload_flag = nullptr;
   });
 }
 

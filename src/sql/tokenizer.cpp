@@ -22,6 +22,8 @@ TokenType KeywordOrIdentifier(std::string_view word) {
   const std::string upper = absl::AsciiStrToUpper(word);
   if (upper == "SELECT")
     return TokenType::kSelect;
+  if (upper == "COUNT")
+    return TokenType::kCount;
   if (upper == "FROM")
     return TokenType::kFrom;
   if (upper == "WHERE")
@@ -40,6 +42,18 @@ TokenType KeywordOrIdentifier(std::string_view word) {
     return TokenType::kLimit;
   if (upper == "OFFSET")
     return TokenType::kOffset;
+  if (upper == "ORDER")
+    return TokenType::kOrder;
+  if (upper == "BY")
+    return TokenType::kBy;
+  if (upper == "ASC")
+    return TokenType::kAsc;
+  if (upper == "DESC")
+    return TokenType::kDesc;
+  if (upper == "DISTINCT")
+    return TokenType::kDistinct;
+  if (upper == "AS")
+    return TokenType::kAs;
   if (upper == "CREATE")
     return TokenType::kCreate;
   if (upper == "TABLE")
@@ -221,6 +235,8 @@ std::string ToString(TokenType type) {
   switch (type) {
   case TokenType::kSelect:
     return "SELECT";
+  case TokenType::kCount:
+    return "COUNT";
   case TokenType::kFrom:
     return "FROM";
   case TokenType::kWhere:
@@ -239,6 +255,18 @@ std::string ToString(TokenType type) {
     return "LIMIT";
   case TokenType::kOffset:
     return "OFFSET";
+  case TokenType::kOrder:
+    return "ORDER";
+  case TokenType::kBy:
+    return "BY";
+  case TokenType::kAsc:
+    return "ASC";
+  case TokenType::kDesc:
+    return "DESC";
+  case TokenType::kDistinct:
+    return "DISTINCT";
+  case TokenType::kAs:
+    return "AS";
   case TokenType::kCreate:
     return "CREATE";
   case TokenType::kTable:

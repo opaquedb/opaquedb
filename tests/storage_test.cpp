@@ -252,6 +252,34 @@ TEST_F(StorageTest, PublishOpenListRollback) {
   EXPECT_FALSE((*repo)->Rollback(99).ok()); // unknown version
 }
 
+TEST_F(StorageTest, PruneKeepsTheMostRecentEpochsAndNeverDropsCurrent) {
+  auto repo = LocalEpochRepository::Open(Path("prune_repo"));
+  ASSERT_TRUE(repo.ok()) << repo.status().message();
+
+  for (std::uint8_t v = 1; v <= 5; ++v) {
+    StagingEpoch s = MakeStaging();
+    ASSERT_TRUE(s.AppendRow(MakeRow(v)).ok());
+    ASSERT_TRUE((*repo)->Publish(s, v).ok());
+  }
+
+  // Keep only the two highest versions; the older three are deleted.
+  ASSERT_TRUE((*repo)->Prune(2).ok());
+  auto epochs = (*repo)->ListEpochs();
+  ASSERT_TRUE(epochs.ok());
+  EXPECT_EQ(*epochs, (std::vector<std::uint64_t>{4, 5}));
+
+  // CURRENT (5) still opens, and a pruned version is gone.
+  EXPECT_TRUE((*repo)->OpenCurrent().ok());
+  EXPECT_FALSE((*repo)->OpenVersion(1).ok());
+
+  // keep == 0 disables retention; keep >= count is a no-op.
+  ASSERT_TRUE((*repo)->Prune(0).ok());
+  ASSERT_TRUE((*repo)->Prune(99).ok());
+  epochs = (*repo)->ListEpochs();
+  ASSERT_TRUE(epochs.ok());
+  EXPECT_EQ(*epochs, (std::vector<std::uint64_t>{4, 5}));
+}
+
 TEST_F(StorageTest, RecoveryReplaysWalIntoStagingAndPublishes) {
   // Simulate ingest: append rows to a WAL, then crash.
   {

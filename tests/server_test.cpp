@@ -64,9 +64,11 @@ protected:
     cfg_.node.data_dir = dir_.string();
     cfg_.storage.record_bytes = 32;     // small records keep the test quick
     cfg_.server.listen = "127.0.0.1:0"; // ephemeral port
-    // This suite exercises the query path, not auth; run in open mode.
+    // This suite exercises the query path, not auth; run in open mode with a
+    // plaintext client channel (the transport-security suite covers TLS).
     cfg_.auth.mode = opaquedb::config::AuthMode::kNone;
     cfg_.auth.enable_insecure = true;
+    cfg_.client.allow_insecure = true;
   }
   void TearDown() override {
     std::error_code ec;
@@ -122,6 +124,49 @@ TEST_F(ServerEndToEnd, PrivateSelectReturnsTheRightRow) {
   (*node)->Shutdown();
 }
 
+// WHERE k IN (...) returns every listed row, and SELECT COUNT(*) returns the
+// exact match count from the encrypted presence ciphertext. End to end: the
+// client lifts the inline literals, encrypts one operand per value, the matcher
+// unions them, and the client decodes rows or sums the count.
+TEST_F(ServerEndToEnd, InListAndCountStar) {
+  LoadTable(8); // keys 0..7, values value-0..value-7
+
+  auto node = NodeServer::Create(cfg_);
+  ASSERT_TRUE(node.ok());
+  ASSERT_TRUE((*node)->Start().ok());
+  ASSERT_TRUE((*node)->WaitForReady().ok());
+
+  auto client = QueryClient::Create(cfg_, (*node)->listen_address());
+  ASSERT_TRUE(client.ok()) << client.status().message();
+  ASSERT_TRUE((*client)->Register("c1").ok());
+
+  // IN returns both listed rows (LIMIT high enough to take them all).
+  auto rows = (*client)->Query(
+      "c1", "SELECT v FROM t WHERE k IN (2, 5) LIMIT 10", 0, "");
+  ASSERT_TRUE(rows.ok()) << rows.status().message();
+  std::vector<std::string> got;
+  for (const std::vector<std::uint8_t> &r : *rows)
+    got.push_back(TextValue(r));
+  std::sort(got.begin(), got.end());
+  EXPECT_EQ(got, (std::vector<std::string>{"value-2", "value-5"}));
+
+  // COUNT(*) over the IN list is exactly 2; absent key 0; unique key 1.
+  auto two = (*client)->QueryCount(
+      "c1", "SELECT COUNT(*) FROM t WHERE k IN (2, 5)", 0);
+  ASSERT_TRUE(two.ok()) << two.status().message();
+  EXPECT_EQ(*two, 2u);
+  auto none =
+      (*client)->QueryCount("c1", "SELECT COUNT(*) FROM t WHERE k = :k", 1000);
+  ASSERT_TRUE(none.ok()) << none.status().message();
+  EXPECT_EQ(*none, 0u);
+  auto one =
+      (*client)->QueryCount("c1", "SELECT COUNT(*) FROM t WHERE k = :k", 3);
+  ASSERT_TRUE(one.ok()) << one.status().message();
+  EXPECT_EQ(*one, 1u);
+
+  (*node)->Shutdown();
+}
+
 // Several rows share one key. A LIMIT query partitions matches into buckets and
 // returns all of them; this is the end-to-end multi-result path from SQL
 // through the matcher to the client decode.
@@ -167,11 +212,11 @@ TEST_F(ServerEndToEnd, LimitReturnsAllRowsSharingAKey) {
                                            "dup-4"}))
       << "all five rows with key 7 must come back";
 
-  // The default (no LIMIT) returns exactly one matching row, not a self
-  // collision, even though five rows share the key.
+  // The default (no LIMIT) returns up to kDefaultSelectLimit (10) clean rows,
+  // not a self collision, so all five rows sharing the key come back.
   auto [one, one_collided] = query("SELECT v FROM t WHERE k = :k");
   EXPECT_EQ(one_collided, 0u);
-  EXPECT_EQ(one.size(), 1u) << "default LIMIT 1 returns one clean row";
+  EXPECT_EQ(one.size(), 5u) << "default LIMIT returns the matching rows";
 
   // LIMIT 2 returns two rows; LIMIT 3 returns three. They are a stable prefix
   // of the full result, so the counts line up.
@@ -191,6 +236,80 @@ TEST_F(ServerEndToEnd, LimitReturnsAllRowsSharingAKey) {
   EXPECT_EQ(paged, (std::vector<std::string>{"dup-0", "dup-1", "dup-2", "dup-3",
                                              "dup-4"}))
       << "paging by OFFSET covers every row once";
+
+  (*node)->Shutdown();
+}
+
+// A SELECT with no WHERE is a plaintext full scan: every row comes back, the
+// row count is exact, and max_rows bounds how many rows the server returns.
+TEST_F(ServerEndToEnd, ScanReturnsRowsWithNoWhere) {
+  LoadTable(8); // keys 0..7, values value-0..value-7
+
+  auto node = NodeServer::Create(cfg_);
+  ASSERT_TRUE(node.ok());
+  ASSERT_TRUE((*node)->Start().ok());
+  ASSERT_TRUE((*node)->WaitForReady().ok());
+
+  auto client = QueryClient::Create(cfg_, (*node)->listen_address());
+  ASSERT_TRUE(client.ok()) << client.status().message();
+  ASSERT_TRUE((*client)->Register("c1").ok());
+
+  auto all = (*client)->Scan("default", "t", /*max_rows=*/100);
+  ASSERT_TRUE(all.ok()) << all.status().message();
+  EXPECT_EQ(all->total_rows, 8u);
+  ASSERT_EQ(all->rows.size(), 8u);
+  std::vector<std::string> got;
+  for (const std::vector<std::uint8_t> &r : all->rows)
+    got.push_back(TextValue(r));
+  std::sort(got.begin(), got.end());
+  EXPECT_EQ(got, (std::vector<std::string>{"value-0", "value-1", "value-2",
+                                           "value-3", "value-4", "value-5",
+                                           "value-6", "value-7"}));
+
+  // max_rows bounds the rows returned but not the reported total.
+  auto few = (*client)->Scan("default", "t", /*max_rows=*/3);
+  ASSERT_TRUE(few.ok()) << few.status().message();
+  EXPECT_EQ(few->rows.size(), 3u);
+  EXPECT_EQ(few->total_rows, 8u);
+
+  // max_rows 0 returns the count alone, the no-WHERE COUNT(*) path.
+  auto count = (*client)->Scan("default", "t", /*max_rows=*/0);
+  ASSERT_TRUE(count.ok()) << count.status().message();
+  EXPECT_TRUE(count->rows.empty());
+  EXPECT_EQ(count->total_rows, 8u);
+
+  (*node)->Shutdown();
+}
+
+// WHERE k <> :k returns every row except the matched one, and COUNT(*) under
+// '<>' is the exact non-matching count.
+TEST_F(ServerEndToEnd, InequalityReturnsOtherRows) {
+  LoadTable(8); // keys 0..7 unique
+
+  auto node = NodeServer::Create(cfg_);
+  ASSERT_TRUE(node.ok());
+  ASSERT_TRUE((*node)->Start().ok());
+  ASSERT_TRUE((*node)->WaitForReady().ok());
+
+  auto client = QueryClient::Create(cfg_, (*node)->listen_address());
+  ASSERT_TRUE(client.ok()) << client.status().message();
+  ASSERT_TRUE((*client)->Register("c1").ok());
+
+  // Exact count is robust to bucket collisions (the presence sum is exact).
+  auto n =
+      (*client)->QueryCount("c1", "SELECT COUNT(*) FROM t WHERE k <> :k", 3);
+  ASSERT_TRUE(n.ok()) << n.status().message();
+  EXPECT_EQ(*n, 7u) << "seven of eight rows have k <> 3";
+
+  std::uint32_t collided = 0;
+  auto rows = (*client)->Query("c1", "SELECT v FROM t WHERE k <> :k LIMIT 16",
+                               3, "", "default", &collided);
+  ASSERT_TRUE(rows.ok()) << rows.status().message();
+  for (const std::vector<std::uint8_t> &r : *rows) {
+    const std::string v = TextValue(r);
+    EXPECT_NE(v, "value-3") << "the matched row must be excluded";
+    EXPECT_EQ(v.rfind("value-", 0), 0u);
+  }
 
   (*node)->Shutdown();
 }

@@ -47,6 +47,15 @@ absl::StatusOr<std::string> BuildEncryptedOperand(const CryptoContext &ctx,
                                                   std::uint64_t value,
                                                   std::uint32_t key_bits);
 
+// Builds the encrypted operand list for a multi-value match (WHERE col IN
+// (...), or a same-column OR): one tiled ciphertext per value, returned as the
+// serialized list the server deserializes. A single value yields the same blob
+// as BuildEncryptedOperand. values must be non-empty.
+absl::StatusOr<std::string>
+BuildEncryptedOperands(const CryptoContext &ctx, const seal::PublicKey &pub,
+                       const std::vector<std::uint64_t> &values,
+                       std::uint32_t key_bits);
+
 // Decrypts a result record. The blob is the serialized list the matcher
 // returned: one ciphertext per payload plane, then a trailing presence
 // ciphertext holding the match count. If the count is zero no row matched, so
@@ -62,6 +71,7 @@ DecryptRecord(const CryptoContext &ctx, const seal::SecretKey &sk,
 struct BucketResult {
   bool present = false;  // a row matched in this bucket
   bool collided = false; // more than one row matched, so the bytes are garbage
+  std::uint64_t count = 0;          // matches in this bucket (the presence sum)
   std::vector<std::uint8_t> record; // valid only when present and not collided
 };
 

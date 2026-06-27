@@ -33,6 +33,32 @@ PeerChannel(const std::string &address, std::uint64_t max_message_bytes,
 
 } // namespace
 
+grpc::Status QueryService::CheckClientOwnership(const std::string &client_id,
+                                                const std::string &principal_id,
+                                                bool claim) {
+  std::lock_guard<std::mutex> lock(owners_mu_);
+  auto it = client_owner_.find(client_id);
+  if (it != client_owner_.end() && it->second != principal_id) {
+    return ToGrpcStatus(absl::PermissionDeniedError(
+        "client id is registered to another principal"));
+  }
+  if (claim && it == client_owner_.end())
+    client_owner_.emplace(client_id, principal_id);
+  return grpc::Status::OK;
+}
+
+std::shared_ptr<grpc::Channel>
+QueryService::PeerChannelFor(const std::string &address) {
+  std::lock_guard<std::mutex> lock(channels_mu_);
+  auto it = channels_.find(address);
+  if (it != channels_.end())
+    return it->second;
+  std::shared_ptr<grpc::Channel> channel =
+      PeerChannel(address, max_message_bytes_, peer_creds_);
+  channels_.emplace(address, channel);
+  return channel;
+}
+
 grpc::Status ToGrpcStatus(const absl::Status &status) {
   if (status.ok())
     return grpc::Status::OK;
@@ -67,9 +93,9 @@ grpc::Status
 QueryService::Register(grpc::ServerContext *context,
                        grpc::ServerReader<proto::RegisterChunk> *reader,
                        proto::RegisterReply *reply) {
-  if (absl::StatusOr<auth::Principal> principal =
-          gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
-      !principal.ok()) {
+  absl::StatusOr<auth::Principal> principal =
+      gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
+  if (!principal.ok()) {
     return ToGrpcStatus(principal.status());
   }
   std::string client_id;
@@ -114,6 +140,13 @@ QueryService::Register(grpc::ServerContext *context,
     return ToGrpcStatus(
         absl::InvalidArgumentError("register stream carried no chunks"));
   }
+  // Bind the client id to this principal, or reject if another principal owns
+  // it, so a caller cannot overwrite someone else's keyring entry.
+  if (grpc::Status s =
+          CheckClientOwnership(client_id, principal->id, /*claim=*/true);
+      !s.ok()) {
+    return s;
+  }
 
   crypto::KeyMaterial keys;
   keys.public_key = std::move(public_key);
@@ -122,7 +155,8 @@ QueryService::Register(grpc::ServerContext *context,
   if (absl::Status s = engine_->RegisterClient(client_id, keys); !s.ok()) {
     return ToGrpcStatus(s);
   }
-  spdlog::info("client {} registered keys", client_id);
+  spdlog::info("audit: register principal={} client={}", principal->id,
+               client_id);
 
   // The node that received this Register is the coordinator for the client: it
   // stored the keys locally above and now distributes them to every shard peer
@@ -156,8 +190,7 @@ QueryService::Register(grpc::ServerContext *context,
                  key_peers.size());
   }
   for (const std::string &peer : key_peers) {
-    auto stub = proto::Internal::NewStub(
-        PeerChannel(peer, max_message_bytes_, peer_creds_));
+    auto stub = proto::Internal::NewStub(PeerChannelFor(peer));
     grpc::ClientContext ctx;
     proto::KeyUploadReply ack;
     std::unique_ptr<grpc::ClientWriter<proto::KeyUploadChunk>> w(
@@ -183,14 +216,20 @@ QueryService::Register(grpc::ServerContext *context,
 grpc::Status QueryService::Execute(grpc::ServerContext *context,
                                    const proto::QueryRequest *request,
                                    proto::QueryReply *reply) {
-  if (absl::StatusOr<auth::Principal> principal =
-          gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
-      !principal.ok()) {
+  absl::StatusOr<auth::Principal> principal =
+      gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
+  if (!principal.ok()) {
     return ToGrpcStatus(principal.status());
   }
   if (request->wire_version() != core::kWireVersion) {
     return ToGrpcStatus(absl::FailedPreconditionError(absl::StrCat(
         "wire version ", request->wire_version(), " not supported")));
+  }
+  // Only the principal that registered this client id may query under it.
+  if (grpc::Status s = CheckClientOwnership(request->client_id(), principal->id,
+                                            /*claim=*/false);
+      !s.ok()) {
+    return s;
   }
 
   // With shard peers, coordinate: evaluate the local shard, fan the same query
@@ -199,18 +238,21 @@ grpc::Status QueryService::Execute(grpc::ServerContext *context,
   const std::vector<std::string> peers = peers_();
   absl::StatusOr<Engine::QueryResult> result = absl::UnknownError("unset");
   if (peers.empty()) {
-    spdlog::info("query from client {} on database {} (single-node)",
-                 request->client_id(), request->database());
+    spdlog::info(
+        "audit: query principal={} client={} database={} (single-node)",
+        principal->id, request->client_id(), request->database());
     result = engine_->Execute(request->client_id(), request->database(),
                               request->sql_template(),
                               request->encrypted_param(), request->backend());
   } else {
-    spdlog::info("query from client {} on database {} (coordinating {} peers)",
-                 request->client_id(), request->database(), peers.size());
+    spdlog::info("audit: query principal={} client={} database={} "
+                 "(coordinating {} peers)",
+                 principal->id, request->client_id(), request->database(),
+                 peers.size());
     std::vector<std::shared_ptr<grpc::Channel>> channels;
     channels.reserve(peers.size());
     for (const std::string &peer : peers) {
-      channels.push_back(PeerChannel(peer, max_message_bytes_, peer_creds_));
+      channels.push_back(PeerChannelFor(peer));
     }
     QueryCoordinator coordinator(engine_, std::move(channels), epoch_(),
                                  max_message_bytes_);
@@ -236,9 +278,11 @@ grpc::Status QueryService::Execute(grpc::ServerContext *context,
 grpc::Status QueryService::Insert(grpc::ServerContext *context,
                                   const proto::InsertRequest *request,
                                   proto::InsertReply *reply) {
-  if (absl::StatusOr<auth::Principal> principal =
-          gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
-      !principal.ok()) {
+  // Insert mutates the table, so it requires the Admin role; a read-only Query
+  // principal cannot write.
+  absl::StatusOr<auth::Principal> principal =
+      gate_->Check(ExtractAuthInputs(*context), auth::Role::kAdmin);
+  if (!principal.ok()) {
     return ToGrpcStatus(principal.status());
   }
   if (request->wire_version() != core::kWireVersion) {
@@ -256,10 +300,51 @@ grpc::Status QueryService::Insert(grpc::ServerContext *context,
                  outcome.status().message());
     return ToGrpcStatus(outcome.status());
   }
-  spdlog::info("inserted 1 row into {}.{} ({} rows total, epoch {})", db,
-               request->table(), outcome->row_count, outcome->epoch_version);
+  spdlog::info(
+      "audit: insert principal={} into {}.{} ({} rows total, epoch {})",
+      principal->id, db, request->table(), outcome->row_count,
+      outcome->epoch_version);
   reply->set_epoch_version(outcome->epoch_version);
   reply->set_row_count(outcome->row_count);
+  return grpc::Status::OK;
+}
+
+grpc::Status QueryService::Scan(grpc::ServerContext *context,
+                                const proto::ScanRequest *request,
+                                proto::ScanReply *reply) {
+  absl::StatusOr<auth::Principal> principal =
+      gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
+  if (!principal.ok()) {
+    return ToGrpcStatus(principal.status());
+  }
+  if (request->wire_version() != core::kWireVersion) {
+    return ToGrpcStatus(absl::FailedPreconditionError(absl::StrCat(
+        "wire version ", request->wire_version(), " not supported")));
+  }
+  // A full scan must read every shard. Fanning a plaintext scan out across the
+  // cluster is a tracked follow-up; until then, reject rather than silently
+  // return only this node's shard.
+  if (!peers_().empty()) {
+    return ToGrpcStatus(absl::UnimplementedError(
+        "full-table scan (SELECT with no WHERE) is not yet supported on a "
+        "sharded cluster; add a WHERE clause or query a single-node "
+        "deployment"));
+  }
+  const std::string db =
+      request->database().empty() ? "default" : request->database();
+  absl::StatusOr<Engine::ScanResult> result =
+      engine_->Scan(request->database(), request->table(), request->max_rows());
+  if (!result.ok()) {
+    spdlog::warn("scan of {}.{} failed: {}", db, request->table(),
+                 result.status().message());
+    return ToGrpcStatus(result.status());
+  }
+  spdlog::info("audit: scan principal={} {}.{} ({} of {} rows)", principal->id,
+               db, request->table(), result->rows.size(), result->total_rows);
+  reply->set_total_rows(result->total_rows);
+  for (std::vector<std::uint8_t> &row : result->rows) {
+    reply->add_rows(std::string(row.begin(), row.end()));
+  }
   return grpc::Status::OK;
 }
 

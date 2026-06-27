@@ -33,14 +33,28 @@ public:
     if (absl::Status s = Expect(TokenType::kSelect); !s.ok())
       return s;
 
-    // SELECT * returns every column; the planner expands it.
-    if (Match(TokenType::kStar)) {
+    // SELECT DISTINCT removes duplicate rows; applied client-side after decode.
+    stmt.distinct = Match(TokenType::kDistinct);
+
+    // SELECT COUNT(*) returns the encrypted match count, not rows.
+    if (Match(TokenType::kCount)) {
+      if (stmt.distinct) {
+        return absl::InvalidArgumentError(
+            "DISTINCT with COUNT(*) is not supported");
+      }
+      if (absl::Status s = Expect(TokenType::kLParen); !s.ok())
+        return s;
+      if (absl::Status s = Expect(TokenType::kStar); !s.ok())
+        return s;
+      if (absl::Status s = Expect(TokenType::kRParen); !s.ok())
+        return s;
+      stmt.count_star = true;
+    } else if (Match(TokenType::kStar)) {
+      // SELECT * returns every column; the planner expands it.
       stmt.select_all = true;
     } else {
-      absl::StatusOr<std::vector<std::string>> cols = ParseColumns();
-      if (!cols.ok())
-        return cols.status();
-      stmt.projection = *std::move(cols);
+      if (absl::Status s = ParseColumns(stmt); !s.ok())
+        return s;
     }
 
     if (absl::Status s = Expect(TokenType::kFrom); !s.ok())
@@ -50,15 +64,25 @@ public:
       return table.status();
     stmt.table = *std::move(table);
 
-    if (absl::Status s = Expect(TokenType::kWhere); !s.ok())
-      return s;
-    absl::StatusOr<std::unique_ptr<Predicate>> where = ParsePredicate();
-    if (!where.ok())
-      return where.status();
-    stmt.where = *std::move(where);
+    // WHERE is optional. With no WHERE the statement is a full table scan, run
+    // by the plaintext Scan path; where stays null.
+    if (Match(TokenType::kWhere)) {
+      absl::StatusOr<std::unique_ptr<Predicate>> where = ParsePredicate();
+      if (!where.ok())
+        return where.status();
+      stmt.where = *std::move(where);
+    }
+
+    // Optional ORDER BY, applied client-side over the decoded rows.
+    if (Match(TokenType::kOrder)) {
+      if (absl::Status s = Expect(TokenType::kBy); !s.ok())
+        return s;
+      if (absl::Status s = ParseOrderBy(stmt); !s.ok())
+        return s;
+    }
 
     // Optional LIMIT then optional OFFSET. Both are public bounds on how many
-    // result buckets to return and from where; they are not secret values.
+    // result rows to return and from where; they are not secret values.
     if (Match(TokenType::kLimit)) {
       absl::StatusOr<std::uint64_t> n = ParseCount("LIMIT");
       if (!n.ok())
@@ -153,19 +177,43 @@ private:
     return Parameter{Advance().text, std::nullopt};
   }
 
-  absl::StatusOr<std::vector<std::string>> ParseColumns() {
-    std::vector<std::string> columns;
-    absl::StatusOr<std::string> first = ParseIdentifier("a column name");
-    if (!first.ok())
-      return first.status();
-    columns.push_back(*std::move(first));
-    while (Match(TokenType::kComma)) {
-      absl::StatusOr<std::string> next = ParseIdentifier("a column name");
-      if (!next.ok())
-        return next.status();
-      columns.push_back(*std::move(next));
-    }
-    return columns;
+  // Parses the projection list into stmt.projection (column names) and
+  // stmt.projection_aliases (the display name per column: the alias after AS,
+  // or the column name when there is no alias).
+  absl::Status ParseColumns(SelectStatement &stmt) {
+    do {
+      absl::StatusOr<std::string> col = ParseIdentifier("a column name");
+      if (!col.ok())
+        return col.status();
+      std::string display = *col;
+      if (Match(TokenType::kAs)) {
+        absl::StatusOr<std::string> alias = ParseIdentifier("an alias name");
+        if (!alias.ok())
+          return alias.status();
+        display = *std::move(alias);
+      }
+      stmt.projection.push_back(*std::move(col));
+      stmt.projection_aliases.push_back(std::move(display));
+    } while (Match(TokenType::kComma));
+    return absl::OkStatus();
+  }
+
+  // Parses one or more ORDER BY terms into stmt.order_by.
+  absl::Status ParseOrderBy(SelectStatement &stmt) {
+    do {
+      absl::StatusOr<std::string> col = ParseIdentifier("a column name");
+      if (!col.ok())
+        return col.status();
+      OrderByItem item;
+      item.column = *std::move(col);
+      if (Match(TokenType::kDesc)) {
+        item.descending = true;
+      } else {
+        Match(TokenType::kAsc); // ASC is the default; consume it if present
+      }
+      stmt.order_by.push_back(std::move(item));
+    } while (Match(TokenType::kComma));
+    return absl::OkStatus();
   }
 
   // predicate := or_term (OR or_term)*
@@ -308,12 +356,11 @@ absl::StatusOr<PreparedQuery> PrepareClientQuery(std::string_view sql) {
   if (!tokens.ok())
     return tokens.status();
 
-  // In the supported single-equality grammar a literal can appear only as the
-  // match value, so the first literal token is the value to lift out. More than
-  // one literal means a multi-predicate template, which is not evaluable yet.
-  // The number after LIMIT or OFFSET is a public bound, not the match value, so
-  // skip it.
-  const Token *literal = nullptr;
+  // Literals can appear only as match values (an equality value or the entries
+  // of an IN list), so every literal token is a value to lift out, in order.
+  // The number after LIMIT or OFFSET is a public bound, not a value, so skip
+  // it.
+  std::vector<const Token *> literals;
   TokenType prev = TokenType::kEnd;
   for (const Token &tok : *tokens) {
     const TokenType cur = tok.type;
@@ -323,47 +370,50 @@ absl::StatusOr<PreparedQuery> PrepareClientQuery(std::string_view sql) {
       continue;
     }
     prev = cur;
-    if (tok.type != TokenType::kStringLiteral &&
-        tok.type != TokenType::kNumberLiteral)
-      continue;
-    if (literal != nullptr) {
-      return absl::UnimplementedError(
-          "a template with more than one literal is not yet supported");
-    }
-    literal = &tok;
+    if (tok.type == TokenType::kStringLiteral ||
+        tok.type == TokenType::kNumberLiteral)
+      literals.push_back(&tok);
   }
 
   PreparedQuery out;
   out.limit = stmt->limit;
   out.offset = stmt->offset;
-  if (literal == nullptr) {
+  out.count = stmt->count_star;
+  if (literals.empty()) {
     out.sql_template = std::string(src);
     return out; // already parameterized; nothing to strip
   }
 
-  // The literal value, typed the same way the parser would: a quoted token is
-  // text, a digit token is an integer.
-  if (literal->type == TokenType::kStringLiteral) {
-    out.literal = core::Value{literal->text};
-  } else {
-    std::int64_t v = 0;
-    if (!absl::SimpleAtoi(literal->text, &v)) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("number literal '", literal->text, "' is out of range"));
+  // Type and record each literal in source order, then splice a bound parameter
+  // over each. A single value is rewritten to ':v' (the historical form); a
+  // list to ':v0', ':v1', ... so the server's template parses back to the same
+  // IN / OR shape. Splice right-to-left so earlier byte offsets stay valid.
+  const bool single = literals.size() == 1;
+  for (const Token *lit : literals) {
+    if (lit->type == TokenType::kStringLiteral) {
+      out.literals.push_back(core::Value{lit->text});
+    } else {
+      std::int64_t v = 0;
+      if (!absl::SimpleAtoi(lit->text, &v)) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("number literal '", lit->text, "' is out of range"));
+      }
+      out.literals.push_back(core::Value{v});
     }
-    out.literal = core::Value{v};
   }
 
-  // Splice ':v' over the literal's source span. A string token's source spans
-  // its text plus the two surrounding quote characters; a number token's source
-  // is exactly its text.
-  const std::size_t begin = literal->pos;
-  const std::size_t span = literal->type == TokenType::kStringLiteral
-                               ? literal->text.size() + 2
-                               : literal->text.size();
-  out.param_name = "v";
-  out.sql_template = absl::StrCat(src.substr(0, begin), ":", out.param_name,
-                                  src.substr(begin + span));
+  std::string templated(src);
+  for (std::size_t i = literals.size(); i-- > 0;) {
+    const Token *lit = literals[i];
+    const std::size_t begin = lit->pos;
+    const std::size_t span = lit->type == TokenType::kStringLiteral
+                                 ? lit->text.size() + 2
+                                 : lit->text.size();
+    const std::string name = single ? "v" : absl::StrCat("v", i);
+    templated = absl::StrCat(templated.substr(0, begin), ":", name,
+                             templated.substr(begin + span));
+  }
+  out.sql_template = std::move(templated);
   return out;
 }
 

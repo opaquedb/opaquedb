@@ -38,6 +38,13 @@ public:
 struct EncryptedQuery {
   Op op = Op::kEq;
   seal::Ciphertext query;
+  // Additional match operands for IN / same-column OR: a row matches if its key
+  // equals the primary operand OR any of these. A key equals at most one of the
+  // values, so the per-row equality indicators are disjoint and the union is
+  // simply their sum, which adds no multiplicative depth. Each extra operand
+  // costs one more equality pipeline (square + AND-tree) per batch. Empty for a
+  // plain point query.
+  std::vector<seal::Ciphertext> extra_operands;
   // How many result buckets to partition matches into. 1 (the default) is the
   // single-match path: all matching rows collapse into one bucket. A value > 1
   // spreads rows that share a key across distinct buckets so a LIMIT/OFFSET

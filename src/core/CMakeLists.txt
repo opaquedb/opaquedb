@@ -18,4 +18,7 @@ target_link_libraries(opaquedb_core
     absl::statusor
   PRIVATE
     opaquedb_compile_options
-    absl::strings)
+    absl::strings
+    # JSON columns are validated as well-formed JSON at the record_codec
+    # text -> Value boundary. Header-only, an implementation detail, so PRIVATE.
+    nlohmann_json::nlohmann_json)

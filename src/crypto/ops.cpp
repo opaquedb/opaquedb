@@ -3,6 +3,7 @@
 #include <exception>
 #include <optional>
 #include <span>
+#include <unordered_set>
 #include <vector>
 
 #include "absl/strings/str_cat.h"
@@ -52,29 +53,72 @@ absl::StatusOr<int> NoiseBudgetBits(const CryptoContext &ctx,
   }
 }
 
-absl::StatusOr<std::string> BuildEncryptedOperand(const CryptoContext &ctx,
-                                                  const seal::PublicKey &pub,
-                                                  std::uint64_t value,
-                                                  std::uint32_t key_bits) {
-  if (key_bits == 0 || key_bits > 64) {
-    return absl::InvalidArgumentError("key_bits must be in [1, 64]");
-  }
-  // The query value's bits, tiled across every slot so each record's block of
-  // key_bits slots compares against the same value. slot i holds bit i %
-  // key_bits.
+namespace {
+
+// Encrypts one lookup value into the tiled operand ciphertext: the value's bits
+// repeated across every slot so each record's block of key_bits slots compares
+// against the same value (slot i holds bit i % key_bits).
+absl::StatusOr<seal::Ciphertext> EncryptOperand(const CryptoContext &ctx,
+                                                const seal::PublicKey &pub,
+                                                std::uint64_t value,
+                                                std::uint32_t key_bits) {
   const std::vector<std::uint64_t> bits = core::KeyToBits(value, key_bits);
   std::vector<std::uint64_t> slots(ctx.slot_count());
   for (std::size_t i = 0; i < slots.size(); ++i)
     slots[i] = bits[i % key_bits];
-
   absl::StatusOr<seal::Plaintext> plain = ctx.EncodeBatch(slots);
   if (!plain.ok())
     return plain.status();
-  absl::StatusOr<seal::Ciphertext> cipher = Encrypt(ctx, pub, *plain);
-  if (!cipher.ok())
-    return cipher.status();
-  return SerializeCiphertexts(
-      std::vector<seal::Ciphertext>{*std::move(cipher)});
+  return Encrypt(ctx, pub, *plain);
+}
+
+} // namespace
+
+absl::StatusOr<std::string> BuildEncryptedOperand(const CryptoContext &ctx,
+                                                  const seal::PublicKey &pub,
+                                                  std::uint64_t value,
+                                                  std::uint32_t key_bits) {
+  return BuildEncryptedOperands(ctx, pub, {value}, key_bits);
+}
+
+absl::StatusOr<std::string>
+BuildEncryptedOperands(const CryptoContext &ctx, const seal::PublicKey &pub,
+                       const std::vector<std::uint64_t> &values,
+                       std::uint32_t key_bits) {
+  if (key_bits == 0 || key_bits > 64) {
+    return absl::InvalidArgumentError("key_bits must be in [1, 64]");
+  }
+  if (values.empty()) {
+    return absl::InvalidArgumentError("operand list is empty");
+  }
+  // The matcher sums one equality indicator per operand and assumes the
+  // operands are disjoint (a key equals at most one of them). A duplicate value
+  // would make a matching row's indicator 2 instead of 1: the payload is
+  // doubled and the presence count of 2 looks like a bucket collision, so the
+  // row is dropped. WHERE k IN (5, 5) or k = 5 OR k = 5 hits exactly this.
+  // Dedup here, the single point every operand list flows through, so the
+  // disjointness the matcher relies on always holds. Stable order keeps the
+  // first operand (the primary) predictable.
+  std::vector<std::uint64_t> distinct;
+  distinct.reserve(values.size());
+  {
+    std::unordered_set<std::uint64_t> seen;
+    seen.reserve(values.size());
+    for (std::uint64_t value : values) {
+      if (seen.insert(value).second)
+        distinct.push_back(value);
+    }
+  }
+  std::vector<seal::Ciphertext> ciphers;
+  ciphers.reserve(distinct.size());
+  for (std::uint64_t value : distinct) {
+    absl::StatusOr<seal::Ciphertext> cipher =
+        EncryptOperand(ctx, pub, value, key_bits);
+    if (!cipher.ok())
+      return cipher.status();
+    ciphers.push_back(*std::move(cipher));
+  }
+  return SerializeCiphertexts(ciphers);
 }
 
 absl::StatusOr<std::vector<BucketResult>>
@@ -91,7 +135,8 @@ DecryptResults(const CryptoContext &ctx, const seal::SecretKey &sk,
   // planes payload ciphertexts plus one trailing presence ciphertext.
   const std::uint32_t expected = planes + 1;
   absl::StatusOr<std::vector<seal::Ciphertext>> ciphers =
-      DeserializeCiphertexts(ctx, encrypted_blob, /*max_count=*/expected);
+      DeserializeCiphertexts(ctx, encrypted_blob, /*max_count=*/expected,
+                             /*require_top_level=*/false);
   if (!ciphers.ok())
     return ciphers.status();
   if (ciphers->size() != expected) {
@@ -149,6 +194,7 @@ DecryptResults(const CryptoContext &ctx, const seal::SecretKey &sk,
     const std::size_t base = static_cast<std::size_t>(g) * stride;
     const std::vector<std::uint64_t> pres = bucket_block(planes, base);
     BucketResult br;
+    br.count = pres[0]; // matches in this bucket; for COUNT(*) the client sums
     if (pres[0] == 0) {
       out.push_back(std::move(br)); // empty bucket
       continue;

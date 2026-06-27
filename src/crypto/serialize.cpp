@@ -49,7 +49,7 @@ std::string SerializeCiphertexts(const std::vector<seal::Ciphertext> &ciphers) {
 
 absl::StatusOr<std::vector<seal::Ciphertext>>
 DeserializeCiphertexts(const CryptoContext &ctx, const std::string &bytes,
-                       std::uint32_t max_count) {
+                       std::uint32_t max_count, bool require_top_level) {
   std::size_t offset = 0;
   std::uint32_t count = 0;
   if (!ReadU32(bytes, offset, &count)) {
@@ -79,14 +79,21 @@ DeserializeCiphertexts(const CryptoContext &ctx, const std::string &bytes,
       seal::Ciphertext cipher;
       std::istringstream stream(bytes.substr(offset, length), std::ios::binary);
       cipher.load(ctx.seal(), stream);
-      // Defense in depth over load()'s own checks: a client operand is a fresh
-      // encryption, so it must sit at the top of the modulus chain and be a
-      // normal two-polynomial ciphertext. Reject anything else before it
-      // reaches the evaluator, where an unexpected shape could be costly or
-      // unsound.
-      if (cipher.parms_id() != ctx.seal().first_parms_id()) {
+      // Defense in depth over load()'s own checks. A client operand is a fresh
+      // encryption, so it must sit at the top of the modulus chain; reject
+      // anything else before it reaches the evaluator, where an unexpected
+      // shape could be costly or unsound. Server-produced partials and results
+      // (require_top_level == false) may have been mod-switched down the chain,
+      // so for those we only require that the parms_id names a real level of
+      // this context's modulus chain.
+      if (require_top_level) {
+        if (cipher.parms_id() != ctx.seal().first_parms_id()) {
+          return absl::InvalidArgumentError(absl::StrCat(
+              "ciphertext ", i, " has unexpected encryption parameters"));
+        }
+      } else if (ctx.seal().get_context_data(cipher.parms_id()) == nullptr) {
         return absl::InvalidArgumentError(absl::StrCat(
-            "ciphertext ", i, " has unexpected encryption parameters"));
+            "ciphertext ", i, " is not bound to a valid modulus level"));
       }
       if (cipher.size() < 2 || cipher.size() > 3) {
         return absl::InvalidArgumentError(absl::StrCat(

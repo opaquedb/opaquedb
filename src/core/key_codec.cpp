@@ -48,6 +48,9 @@ absl::StatusOr<KeyEncoding> EncodeKeyValue(ColumnType type, const Value &value,
     return absl::InvalidArgumentError(
         "a REAL column cannot be a match key; equality on floating point is "
         "not well defined");
+  case ColumnType::kJson:
+    return absl::InvalidArgumentError(
+        "a JSON column cannot be a match key; it is payload only");
   }
   return absl::InternalError("unknown column type");
 }

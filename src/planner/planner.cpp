@@ -92,10 +92,15 @@ Planner::Plan(const core::Schema &schema, const sql::LogicalPlan &logical,
   plan.match_column = logical.match_column;
   plan.match_column_index = *match_index;
   plan.parameter = logical.parameter;
+  plan.match_operands = logical.match_operands;
+  plan.count = logical.count;
   plan.limit = logical.limit;
   plan.offset = logical.offset;
 
-  if (logical.select_all) {
+  if (logical.count) {
+    // COUNT(*) projects nothing: the count comes from the encrypted presence
+    // ciphertext, which the matcher always returns.
+  } else if (logical.select_all) {
     // SELECT * expands to every payload column in schema order. Payload is
     // every column except the primary key (kEq): RAW columns and secondary
     // indexes (kIndex) alike. The primary key is stored as a key value, not in

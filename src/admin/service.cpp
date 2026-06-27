@@ -1,6 +1,7 @@
 #include "opaquedb/admin/service.h"
 
 #include <memory>
+#include <mutex>
 #include <utility>
 
 #include "opaquedb/backend/registry.h"
@@ -48,6 +49,9 @@ absl::Status AdminService::RollbackEpoch(std::uint64_t version) {
 
 absl::StatusOr<std::uint64_t>
 AdminService::Publish(const storage::StagingEpoch &staging) {
+  // Serialize against concurrent writers so the next-version read and the
+  // publish are atomic for this table.
+  std::lock_guard<std::mutex> write_lock(repo_->write_mutex());
   std::uint64_t next = 1;
   if (absl::StatusOr<std::uint64_t> current = repo_->CurrentVersion();
       current.ok()) {

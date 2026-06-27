@@ -1,7 +1,10 @@
 #include "opaquedb/client/query_client.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -24,7 +27,55 @@ grpc::ChannelArguments ChannelArgs(const config::Config &cfg) {
       std::min<std::uint64_t>(cfg.server.max_message_bytes, 2147483647ULL));
   args.SetMaxReceiveMessageSize(max);
   args.SetMaxSendMessageSize(max);
+  // When dialing by IP or loopback the certificate host name will not match the
+  // target, so let the operator override the name the client verifies against.
+  if (!cfg.client.server_name.empty())
+    args.SetSslTargetNameOverride(cfg.client.server_name);
   return args;
+}
+
+absl::StatusOr<std::string> ReadFile(const std::string &path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in)
+    return absl::NotFoundError(absl::StrCat("cannot read '", path, "'"));
+  std::ostringstream out;
+  out << in.rdbuf();
+  return out.str();
+}
+
+// Channel credentials for the client, chosen by the [client] config. mTLS
+// (client cert + key + CA) presents a certificate and verifies the server;
+// server-auth TLS (CA only) verifies the server; allow_insecure permits a
+// plaintext channel for local development. With none of these set the client
+// fails closed rather than sending a bearer token over an unauthenticated
+// channel.
+absl::StatusOr<std::shared_ptr<grpc::ChannelCredentials>>
+MakeClientCredentials(const config::ClientConfig &client) {
+  const bool have_client_cert =
+      !client.tls_cert.empty() && !client.tls_key.empty();
+  if (!client.ca_cert.empty()) {
+    grpc::SslCredentialsOptions opts;
+    absl::StatusOr<std::string> ca = ReadFile(client.ca_cert);
+    if (!ca.ok())
+      return ca.status();
+    opts.pem_root_certs = *ca;
+    if (have_client_cert) {
+      absl::StatusOr<std::string> cert = ReadFile(client.tls_cert);
+      if (!cert.ok())
+        return cert.status();
+      absl::StatusOr<std::string> key = ReadFile(client.tls_key);
+      if (!key.ok())
+        return key.status();
+      opts.pem_cert_chain = *cert;
+      opts.pem_private_key = *key;
+    }
+    return grpc::SslCredentials(opts);
+  }
+  if (client.allow_insecure)
+    return grpc::InsecureChannelCredentials();
+  return absl::FailedPreconditionError(
+      "client transport is not configured: set client.ca_cert to verify the "
+      "server over TLS, or client.allow_insecure = true for local development");
 }
 
 absl::Status FromGrpc(const grpc::Status &s) {
@@ -49,8 +100,11 @@ QueryClient::Create(const config::Config &cfg, const std::string &target,
       *c, core::RequiredGaloisSteps(static_cast<std::uint32_t>(c->slot_count()),
                                     cfg.crypto.key_bits));
 
-  auto channel = grpc::CreateCustomChannel(
-      target, grpc::InsecureChannelCredentials(), ChannelArgs(cfg));
+  absl::StatusOr<std::shared_ptr<grpc::ChannelCredentials>> creds =
+      MakeClientCredentials(cfg.client);
+  if (!creds.ok())
+    return creds.status();
+  auto channel = grpc::CreateCustomChannel(target, *creds, ChannelArgs(cfg));
   auto stub = proto::OpaqueDB::NewStub(channel);
 
   return std::unique_ptr<QueryClient>(new QueryClient(
@@ -159,31 +213,39 @@ QueryClient::Insert(const std::string &database, const std::string &table,
   return InsertResult{reply.epoch_version(), reply.row_count()};
 }
 
-absl::StatusOr<std::vector<std::vector<std::uint8_t>>>
-QueryClient::Query(const std::string &client_id,
-                   const std::string &sql_template, std::uint64_t value,
-                   const std::string &backend_hint, const std::string &database,
-                   std::uint32_t *collided_buckets) {
-  // Lift any inline literal out of the template. The literal is the secret; it
-  // is encrypted here and the server only ever sees the parameterized form.
+absl::StatusOr<QueryClient::Decoded>
+QueryClient::RunQuery(const std::string &client_id,
+                      const std::string &sql_template, std::uint64_t value,
+                      const std::string &backend_hint,
+                      const std::string &database) {
+  // Lift inline literals out of the template. They are the secret values;
+  // encrypted here, the server only ever sees the parameterized form.
   absl::StatusOr<sql::PreparedQuery> prepared =
       sql::PrepareClientQuery(sql_template);
   if (!prepared.ok())
     return prepared.status();
 
-  // The match value is the lifted literal when present, otherwise the bound
-  // integer the caller passed.
-  const core::Value key = prepared->literal.has_value()
-                              ? *prepared->literal
-                              : core::Value{static_cast<std::int64_t>(value)};
+  // The match operands are the lifted literals when present (one for a point
+  // query, several for IN / OR), otherwise the single bound value the caller
+  // passed.
+  std::vector<core::Value> values;
+  if (prepared->literals.empty()) {
+    values.push_back(core::Value{static_cast<std::int64_t>(value)});
+  } else {
+    values = prepared->literals;
+  }
+  std::vector<std::uint64_t> universe;
+  universe.reserve(values.size());
+  for (const core::Value &v : values) {
+    absl::StatusOr<core::KeyEncoding> key_value =
+        core::EncodeKeyValue(core::ColumnTypeOf(v), v, cfg_.crypto.key_bits);
+    if (!key_value.ok())
+      return key_value.status();
+    universe.push_back(key_value->value);
+  }
 
-  absl::StatusOr<core::KeyEncoding> key_value =
-      core::EncodeKeyValue(core::ColumnTypeOf(key), key, cfg_.crypto.key_bits);
-  if (!key_value.ok())
-    return key_value.status();
-
-  absl::StatusOr<std::string> enc = crypto::BuildEncryptedOperand(
-      ctx_, keyring_.public_key(), key_value->value, cfg_.crypto.key_bits);
+  absl::StatusOr<std::string> enc = crypto::BuildEncryptedOperands(
+      ctx_, keyring_.public_key(), universe, cfg_.crypto.key_bits);
   if (!enc.ok())
     return enc.status();
 
@@ -203,17 +265,12 @@ QueryClient::Query(const std::string &client_id,
   }
 
   // The server partitioned matches into result_buckets buckets and packed every
-  // bucket into the one result blob. Decode them all into the matched rows (in
-  // bucket order, stable across queries), then apply LIMIT/OFFSET as a row
-  // skip/take. LIMIT thus counts rows, not bucket slots, and OFFSET pages
-  // through the matches. Default is LIMIT 1, OFFSET 0.
+  // bucket into the one result blob. Decode them all (in bucket order, stable
+  // across queries); the callers interpret the buckets as rows or as a count.
   const std::uint32_t buckets = cfg_.crypto.result_buckets;
-  const std::uint64_t offset = prepared->offset.value_or(0);
-  const std::uint64_t limit = prepared->limit.value_or(1);
-
   const std::uint32_t bps = cfg_.crypto.BytesPerSlot();
-  std::vector<std::vector<std::uint8_t>> matched;
-  std::uint32_t collided = 0;
+  Decoded out;
+  out.prepared = *std::move(prepared);
   for (const std::string &blob : reply.encrypted_result()) {
     absl::StatusOr<std::vector<crypto::BucketResult>> recs =
         crypto::DecryptResults(ctx_, keyring_.secret_key(), blob,
@@ -221,27 +278,114 @@ QueryClient::Query(const std::string &client_id,
                                bps, buckets, /*offset=*/0, /*limit=*/buckets);
     if (!recs.ok())
       return recs.status();
-    for (crypto::BucketResult &br : *recs) {
-      if (br.collided) {
-        ++collided; // two rows with the same key fell in one bucket
-        continue;
-      }
-      // An absent bucket means no row matched there; only present, clean
-      // buckets are matched rows.
-      if (br.present)
-        matched.push_back(std::move(br.record));
-    }
+    for (crypto::BucketResult &br : *recs)
+      out.buckets.push_back(std::move(br));
   }
-  if (collided_buckets != nullptr)
-    *collided_buckets = collided;
+  return out;
+}
 
-  // Apply the public row window: skip `offset` rows, take up to `limit`.
+namespace {
+
+// Collects the clean matched rows from decoded buckets and counts the dropped
+// same-key collisions. An absent bucket means no row matched there; a collided
+// bucket held more than one same-key row and is dropped (and counted).
+std::vector<std::vector<std::uint8_t>>
+CollectClean(std::vector<crypto::BucketResult> &buckets,
+             std::uint32_t *collided_out) {
+  std::vector<std::vector<std::uint8_t>> matched;
+  std::uint32_t collided = 0;
+  for (crypto::BucketResult &br : buckets) {
+    if (br.collided) {
+      ++collided;
+      continue;
+    }
+    if (br.present)
+      matched.push_back(std::move(br.record));
+  }
+  if (collided_out != nullptr)
+    *collided_out = collided;
+  return matched;
+}
+
+} // namespace
+
+absl::StatusOr<std::vector<std::vector<std::uint8_t>>> QueryClient::QueryClean(
+    const std::string &client_id, const std::string &sql_template,
+    std::uint64_t value, const std::string &backend_hint,
+    const std::string &database, std::uint32_t *collided_buckets) {
+  absl::StatusOr<Decoded> decoded =
+      RunQuery(client_id, sql_template, value, backend_hint, database);
+  if (!decoded.ok())
+    return decoded.status();
+  return CollectClean(decoded->buckets, collided_buckets);
+}
+
+absl::StatusOr<std::vector<std::vector<std::uint8_t>>>
+QueryClient::Query(const std::string &client_id,
+                   const std::string &sql_template, std::uint64_t value,
+                   const std::string &backend_hint, const std::string &database,
+                   std::uint32_t *collided_buckets) {
+  absl::StatusOr<Decoded> decoded =
+      RunQuery(client_id, sql_template, value, backend_hint, database);
+  if (!decoded.ok())
+    return decoded.status();
+
+  std::vector<std::vector<std::uint8_t>> matched =
+      CollectClean(decoded->buckets, collided_buckets);
+
+  // Apply the public row window: skip `offset` rows, take up to `limit`. LIMIT
+  // counts rows, not bucket slots; default is kDefaultSelectLimit, OFFSET 0.
+  const std::uint64_t offset = decoded->prepared.offset.value_or(0);
+  const std::uint64_t limit =
+      decoded->prepared.limit.value_or(sql::kDefaultSelectLimit);
   std::vector<std::vector<std::uint8_t>> out;
   for (std::uint64_t i = offset; i < matched.size() && out.size() < limit;
        ++i) {
     out.push_back(std::move(matched[i]));
   }
   return out;
+}
+
+absl::StatusOr<QueryClient::ScanResult>
+QueryClient::Scan(const std::string &database, const std::string &table,
+                  std::uint64_t max_rows) {
+  opaquedb::proto::ScanRequest req;
+  req.set_wire_version(core::kWireVersion);
+  req.set_database(database);
+  req.set_table(table);
+  req.set_max_rows(max_rows);
+
+  grpc::ClientContext ctx;
+  Authorize(ctx);
+  opaquedb::proto::ScanReply reply;
+  if (grpc::Status s = stub_->Scan(&ctx, req, &reply); !s.ok()) {
+    return FromGrpc(s);
+  }
+  ScanResult out;
+  out.total_rows = reply.total_rows();
+  out.rows.reserve(static_cast<std::size_t>(reply.rows_size()));
+  for (const std::string &row : reply.rows()) {
+    out.rows.emplace_back(row.begin(), row.end());
+  }
+  return out;
+}
+
+absl::StatusOr<std::uint64_t>
+QueryClient::QueryCount(const std::string &client_id,
+                        const std::string &sql_template, std::uint64_t value,
+                        const std::string &backend_hint,
+                        const std::string &database) {
+  absl::StatusOr<Decoded> decoded =
+      RunQuery(client_id, sql_template, value, backend_hint, database);
+  if (!decoded.ok())
+    return decoded.status();
+  // Every matching row contributes 1 to exactly one bucket's presence count, so
+  // summing the per-bucket counts is the exact total even when rows collide in
+  // a bucket (a collision corrupts the payload bytes, not the count).
+  std::uint64_t total = 0;
+  for (const crypto::BucketResult &br : decoded->buckets)
+    total += br.count;
+  return total;
 }
 
 } // namespace opaquedb::client

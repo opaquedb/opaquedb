@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Pre-commit hook: clang-format every staged C/C++ source in place, then restage
+# it, so a commit is always formatted the way CI's `make format-check` expects.
+# A formatting slip never reaches CI because it is fixed here, at commit time.
+#
+# Enable it once per clone with:
+#   git config core.hooksPath .githooks
+# (or run `make hooks`). The hook is tracked in the repo so every clone gets the
+# same behaviour.
+#
+# It only touches files already staged for this commit and only the formatted
+# regions clang-format changes; it does not reformat the whole tree.
+
+set -euo pipefail
+
+if ! command -v clang-format >/dev/null 2>&1; then
+  echo "pre-commit: clang-format not found, skipping format (install it to enable)" >&2
+  exit 0
+fi
+
+# Staged files (added/copied/modified), C/C++ sources only, NUL-delimited so
+# paths with spaces survive.
+mapfile -d '' -t files < <(
+  git diff --cached --name-only --diff-filter=ACM -z -- '*.cpp' '*.h' '*.cc' '*.hpp'
+)
+
+if [ ${#files[@]} -eq 0 ]; then
+  exit 0
+fi
+
+clang-format -i "${files[@]}"
+git add -- "${files[@]}"

@@ -14,6 +14,8 @@
 #include "opaquedb/core/schema.h"
 #include "opaquedb/crypto/context.h"
 #include "opaquedb/crypto/key_material.h"
+#include "opaquedb/crypto/ops.h"
+#include "opaquedb/sql/parser.h"
 
 // Reusable client for the OpaqueDB wire protocol. It owns the keyring and
 // performs the constant-weight encoding, encryption of the query parameter,
@@ -56,6 +58,39 @@ public:
         const std::string &database = "default",
         std::uint32_t *collided_buckets = nullptr);
 
+  // Every clean matched row, with no LIMIT/OFFSET window applied. The caller
+  // applies DISTINCT, ORDER BY, and the row window itself (the CLI does this
+  // over decoded rows). Same value / literal handling as Query.
+  // collided_buckets receives the dropped same-key collision count as in Query.
+  absl::StatusOr<std::vector<std::vector<std::uint8_t>>>
+  QueryClean(const std::string &client_id, const std::string &sql_template,
+             std::uint64_t value, const std::string &backend_hint = "",
+             const std::string &database = "default",
+             std::uint32_t *collided_buckets = nullptr);
+
+  // The rows of a table for a SELECT with no WHERE (a full scan). rows are
+  // plaintext payload records the caller decodes with the schema; total_rows is
+  // the table's true row count (for a no-WHERE COUNT(*)). max_rows bounds how
+  // many rows the server returns (0 returns none, just the count). Plaintext by
+  // design: a no-WHERE query matches no secret value, so there is nothing to
+  // hide. database empty means "default".
+  struct ScanResult {
+    std::vector<std::vector<std::uint8_t>> rows;
+    std::uint64_t total_rows = 0;
+  };
+  absl::StatusOr<ScanResult> Scan(const std::string &database,
+                                  const std::string &table,
+                                  std::uint64_t max_rows);
+
+  // Execute a private SELECT COUNT(*) query and return the number of matching
+  // rows. The match count comes from the encrypted presence ciphertext summed
+  // across every result bucket, so it is exact even when rows collide in a
+  // bucket. Same value / literal handling as Query.
+  absl::StatusOr<std::uint64_t>
+  QueryCount(const std::string &client_id, const std::string &sql_template,
+             std::uint64_t value, const std::string &backend_hint = "",
+             const std::string &database = "default");
+
   // The outcome of an insert: the new epoch version and total row count.
   struct InsertResult {
     std::uint64_t epoch_version = 0;
@@ -81,6 +116,19 @@ private:
               std::string bearer_token);
 
   void Authorize(grpc::ClientContext &context) const;
+
+  // Runs a prepared query end to end: lifts inline literals, encrypts the
+  // operand(s), executes, and decodes every result bucket. Query and QueryCount
+  // share it and then interpret the buckets differently (rows vs. count).
+  struct Decoded {
+    sql::PreparedQuery prepared;
+    std::vector<crypto::BucketResult> buckets;
+  };
+  absl::StatusOr<Decoded> RunQuery(const std::string &client_id,
+                                   const std::string &sql_template,
+                                   std::uint64_t value,
+                                   const std::string &backend_hint,
+                                   const std::string &database);
 
   config::Config cfg_;
   crypto::CryptoContext ctx_;

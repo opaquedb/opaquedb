@@ -245,4 +245,32 @@ absl::Status LocalEpochRepository::Rollback(std::uint64_t version) {
   return SetCurrent(version);
 }
 
+absl::Status LocalEpochRepository::Prune(std::uint64_t keep) {
+  if (keep == 0)
+    return absl::OkStatus(); // retention disabled: keep every epoch
+
+  absl::StatusOr<std::vector<std::uint64_t>> versions = ListEpochs();
+  if (!versions.ok())
+    return versions.status();
+  if (versions->size() <= keep)
+    return absl::OkStatus();
+
+  // ListEpochs returns ascending, and CURRENT is the highest after a publish,
+  // so keeping the top `keep` versions always retains CURRENT and a rollback
+  // window. Delete everything below the cutoff. A failed unlink is logged via
+  // the returned status but leaves earlier deletes done; epochs are independent
+  // directories, so a partial prune is still consistent.
+  const std::size_t cutoff = versions->size() - static_cast<std::size_t>(keep);
+  std::error_code ec;
+  for (std::size_t i = 0; i < cutoff; ++i) {
+    const std::string dir = EpochDir((*versions)[i]);
+    fs::remove_all(dir, ec);
+    if (ec) {
+      return absl::InternalError(absl::StrCat(
+          "cannot prune epoch ", (*versions)[i], ": ", ec.message()));
+    }
+  }
+  return absl::OkStatus();
+}
+
 } // namespace opaquedb::storage

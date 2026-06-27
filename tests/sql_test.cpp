@@ -13,6 +13,7 @@
 namespace {
 
 using opaquedb::core::ColumnEncoding;
+using opaquedb::core::ColumnType;
 using opaquedb::sql::AndPredicate;
 using opaquedb::sql::BetweenPredicate;
 using opaquedb::sql::BuildLogicalPlan;
@@ -174,8 +175,8 @@ TEST(Parser, PrepareClientQueryStripsLiteral) {
   auto p = PrepareClientQuery("SELECT temperature FROM weather WHERE city = "
                               "\"London\"");
   ASSERT_TRUE(p.ok());
-  ASSERT_TRUE(p->literal.has_value());
-  EXPECT_EQ(std::get<std::string>(*p->literal), "London");
+  ASSERT_EQ(p->literals.size(), 1u);
+  EXPECT_EQ(std::get<std::string>(p->literals[0]), "London");
   // The rewritten template carries a bound parameter, no literal, and parses
   // and plans cleanly server-side.
   EXPECT_EQ(p->sql_template, "SELECT temperature FROM weather WHERE city = :v");
@@ -186,8 +187,34 @@ TEST(Parser, PrepareClientQueryStripsLiteral) {
   // An already-parameterized query passes through unchanged.
   auto q = PrepareClientQuery("SELECT a FROM t WHERE k = :id");
   ASSERT_TRUE(q.ok());
-  EXPECT_FALSE(q->literal.has_value());
+  EXPECT_TRUE(q->literals.empty());
   EXPECT_EQ(q->sql_template, "SELECT a FROM t WHERE k = :id");
+}
+
+TEST(Parser, PrepareClientQueryLiftsInListAndCountStar) {
+  using opaquedb::sql::Parse;
+  using opaquedb::sql::PrepareClientQuery;
+  // An IN list lifts every literal in order, rewriting to :v0, :v1, ... so the
+  // server template parses back to the same shape and plans.
+  auto p =
+      PrepareClientQuery("SELECT city FROM weather WHERE id IN (17, 42, 99)");
+  ASSERT_TRUE(p.ok()) << p.status().message();
+  ASSERT_EQ(p->literals.size(), 3u);
+  EXPECT_EQ(std::get<std::int64_t>(p->literals[0]), 17);
+  EXPECT_EQ(std::get<std::int64_t>(p->literals[2]), 99);
+  EXPECT_EQ(p->sql_template,
+            "SELECT city FROM weather WHERE id IN (:v0, :v1, :v2)");
+  auto stmt = Parse(p->sql_template);
+  ASSERT_TRUE(stmt.ok());
+  EXPECT_TRUE(BuildLogicalPlan(*stmt).ok());
+
+  // COUNT(*) is flagged so the client reads the match count.
+  auto c = PrepareClientQuery("SELECT COUNT(*) FROM weather WHERE city = "
+                              "\"London\"");
+  ASSERT_TRUE(c.ok()) << c.status().message();
+  EXPECT_TRUE(c->count);
+  ASSERT_EQ(c->literals.size(), 1u);
+  EXPECT_EQ(c->sql_template, "SELECT COUNT(*) FROM weather WHERE city = :v");
 }
 
 TEST(Parser, ParsesSelectStar) {
@@ -246,8 +273,8 @@ TEST(Parser, PrepareClientQueryKeepsLimitAndStripsLiteral) {
   auto p = PrepareClientQuery(
       "SELECT t FROM weather WHERE city = \"London\" LIMIT 4 OFFSET 8");
   ASSERT_TRUE(p.ok()) << p.status().message();
-  ASSERT_TRUE(p->literal.has_value());
-  EXPECT_EQ(std::get<std::string>(*p->literal), "London");
+  ASSERT_EQ(p->literals.size(), 1u);
+  EXPECT_EQ(std::get<std::string>(p->literals[0]), "London");
   EXPECT_EQ(p->sql_template,
             "SELECT t FROM weather WHERE city = :v LIMIT 4 OFFSET 8");
   ASSERT_TRUE(p->limit.has_value());
@@ -268,7 +295,7 @@ TEST(Parser, AcceptsTrailingSemicolon) {
       "SELECT v FROM t WHERE city = \"London\";");
   ASSERT_TRUE(p.ok());
   EXPECT_EQ(p->sql_template, "SELECT v FROM t WHERE city = :v");
-  ASSERT_TRUE(p->literal.has_value());
+  ASSERT_EQ(p->literals.size(), 1u);
 }
 
 TEST(Parser, RejectsMalformedStatements) {
@@ -355,6 +382,20 @@ TEST(Ddl, RejectsRealIndexColumn) {
       ParseCreateTable("CREATE TABLE t (a INT KEY, b REAL INDEX)").ok());
 }
 
+TEST(Ddl, ParsesAJsonPayloadColumn) {
+  auto schema = ParseCreateTable("CREATE TABLE docs (id INT KEY, body JSON)");
+  ASSERT_TRUE(schema.ok()) << schema.status().message();
+  ASSERT_EQ(schema->columns().size(), 2u);
+  EXPECT_EQ(schema->columns()[1].type, ColumnType::kJson);
+  EXPECT_EQ(schema->columns()[1].encoding, ColumnEncoding::kRaw);
+}
+
+TEST(Ddl, RejectsAJsonMatchKey) {
+  EXPECT_FALSE(ParseCreateTable("CREATE TABLE t (k JSON KEY)").ok());
+  EXPECT_FALSE(
+      ParseCreateTable("CREATE TABLE t (a INT KEY, b JSON INDEX)").ok());
+}
+
 TEST(LogicalPlan, BuildsForSupportedEquality) {
   auto stmt = Parse("SELECT v, w FROM t WHERE k = :key");
   ASSERT_TRUE(stmt.ok());
@@ -369,13 +410,11 @@ TEST(LogicalPlan, BuildsForSupportedEquality) {
 
 TEST(LogicalPlan, RejectsUnimplementedOperators) {
   const std::vector<std::string> cases = {
-      "SELECT a FROM t WHERE k <> :p",
       "SELECT a FROM t WHERE k < :p",
-      "SELECT a FROM t WHERE k IN (:a, :b)",
       "SELECT a FROM t WHERE name LIKE :p",
       "SELECT a FROM t WHERE k BETWEEN :lo AND :hi",
       "SELECT a FROM t WHERE k = :p AND j = :q",
-      "SELECT a FROM t WHERE k = :p OR j = :q",
+      "SELECT a FROM t WHERE k = :p OR j = :q", // OR across different columns
   };
   for (const std::string &sql : cases) {
     auto stmt = Parse(sql);
@@ -384,6 +423,40 @@ TEST(LogicalPlan, RejectsUnimplementedOperators) {
     EXPECT_FALSE(plan.ok()) << sql;
     EXPECT_EQ(plan.status().code(), absl::StatusCode::kUnimplemented) << sql;
   }
+}
+
+TEST(LogicalPlan, AcceptsInAndSameColumnOrAsAUnion) {
+  // IN lists and a same-column OR plan as a multi-operand union on one column.
+  auto in_stmt = Parse("SELECT a FROM t WHERE k IN (:a, :b, :c)");
+  ASSERT_TRUE(in_stmt.ok());
+  auto in_plan = BuildLogicalPlan(*in_stmt);
+  ASSERT_TRUE(in_plan.ok()) << in_plan.status().message();
+  EXPECT_EQ(in_plan->match_column, "k");
+  EXPECT_EQ(in_plan->op, opaquedb::sql::CompareOp::kEq);
+  EXPECT_EQ(in_plan->match_operands, 3u);
+
+  auto or_stmt = Parse("SELECT a FROM t WHERE k = :a OR k = :b");
+  ASSERT_TRUE(or_stmt.ok());
+  auto or_plan = BuildLogicalPlan(*or_stmt);
+  ASSERT_TRUE(or_plan.ok()) << or_plan.status().message();
+  EXPECT_EQ(or_plan->match_column, "k");
+  EXPECT_EQ(or_plan->match_operands, 2u);
+
+  // An inline literal inside IN must still be refused at the plan builder (the
+  // client lifts it before sending).
+  auto literal_in = Parse("SELECT a FROM t WHERE k IN (1, 2)");
+  ASSERT_TRUE(literal_in.ok());
+  EXPECT_FALSE(BuildLogicalPlan(*literal_in).ok());
+}
+
+TEST(LogicalPlan, AcceptsCountStar) {
+  auto stmt = Parse("SELECT COUNT(*) FROM t WHERE k = :p");
+  ASSERT_TRUE(stmt.ok()) << stmt.status().message();
+  EXPECT_TRUE(stmt->count_star);
+  auto plan = BuildLogicalPlan(*stmt);
+  ASSERT_TRUE(plan.ok()) << plan.status().message();
+  EXPECT_TRUE(plan->count);
+  EXPECT_TRUE(plan->projection.empty());
 }
 
 TEST(LogicalPlan, RejectsDuplicateProjection) {
@@ -403,6 +476,56 @@ TEST(LogicalPlan, BuilderValidatesRequiredFields) {
   LogicalPlanBuilder full;
   full.SetTable("t").AddProjection("a").SetMatch("k", CompareOp::kEq, "p");
   EXPECT_TRUE(full.Build().ok());
+}
+
+TEST(Parser, AcceptsSelectWithNoWhereAsAScan) {
+  auto stmt = Parse("SELECT * FROM weather");
+  ASSERT_TRUE(stmt.ok()) << stmt.status().message();
+  EXPECT_EQ(stmt->table, "weather");
+  EXPECT_TRUE(stmt->select_all);
+  EXPECT_EQ(stmt->where, nullptr) << "no WHERE means a full scan";
+
+  auto cols = Parse("SELECT city, conditions FROM weather");
+  ASSERT_TRUE(cols.ok()) << cols.status().message();
+  EXPECT_EQ(cols->projection, (std::vector<std::string>{"city", "conditions"}));
+  EXPECT_EQ(cols->where, nullptr);
+
+  // A no-WHERE COUNT(*) parses too: it is the table's row count.
+  auto cnt = Parse("SELECT COUNT(*) FROM weather");
+  ASSERT_TRUE(cnt.ok()) << cnt.status().message();
+  EXPECT_TRUE(cnt->count_star);
+  EXPECT_EQ(cnt->where, nullptr);
+}
+
+TEST(Parser, ParsesDistinctOrderByAndAliases) {
+  auto stmt = Parse("SELECT DISTINCT city AS town, temperature FROM weather "
+                    "ORDER BY temperature DESC, city LIMIT 5 OFFSET 2");
+  ASSERT_TRUE(stmt.ok()) << stmt.status().message();
+  EXPECT_TRUE(stmt->distinct);
+  EXPECT_EQ(stmt->projection,
+            (std::vector<std::string>{"city", "temperature"}));
+  EXPECT_EQ(stmt->projection_aliases,
+            (std::vector<std::string>{"town", "temperature"}));
+  ASSERT_EQ(stmt->order_by.size(), 2u);
+  EXPECT_EQ(stmt->order_by[0].column, "temperature");
+  EXPECT_TRUE(stmt->order_by[0].descending);
+  EXPECT_EQ(stmt->order_by[1].column, "city");
+  EXPECT_FALSE(stmt->order_by[1].descending); // ASC default
+  EXPECT_EQ(stmt->limit, 5u);
+  EXPECT_EQ(stmt->offset, 2u);
+}
+
+TEST(LogicalPlan, AcceptsInequality) {
+  for (const char *sql :
+       {"SELECT a FROM t WHERE k <> :p", "SELECT a FROM t WHERE k != :p"}) {
+    auto stmt = Parse(sql);
+    ASSERT_TRUE(stmt.ok()) << sql << ": " << stmt.status().message();
+    auto plan = BuildLogicalPlan(*stmt);
+    ASSERT_TRUE(plan.ok()) << sql << ": " << plan.status().message();
+    EXPECT_EQ(plan->op, CompareOp::kNe) << sql;
+    EXPECT_EQ(plan->match_column, "k") << sql;
+    EXPECT_EQ(plan->match_operands, 1u) << sql;
+  }
 }
 
 } // namespace
