@@ -26,9 +26,13 @@ struct LogicalPlan {
   std::string table;
   std::vector<std::string> projection;
   bool select_all = false; // SELECT *; the planner expands against the schema
+  bool count = false;      // SELECT COUNT(*): return the match count, no rows
   std::string match_column;
   CompareOp op = CompareOp::kEq;
-  std::string parameter; // the bound parameter name for the match value
+  std::string parameter; // the bound parameter name for the (first) match value
+  // How many encrypted operands the match carries. 1 is a point query; IN
+  // (...) and same-column OR carry one per listed value, matched as a union.
+  std::size_t match_operands = 1;
   // Public result window. Unset limit means the default of 1 (single match);
   // offset counts result buckets. The engine resolves these into a bucket count
   // and a window against the configured result_buckets.
@@ -44,8 +48,10 @@ public:
   LogicalPlanBuilder &SetTable(std::string table);
   LogicalPlanBuilder &AddProjection(std::string column);
   LogicalPlanBuilder &SetSelectAll();
+  LogicalPlanBuilder &SetCount();
   LogicalPlanBuilder &SetMatch(std::string column, CompareOp op,
                                std::string parameter);
+  LogicalPlanBuilder &SetMatchOperands(std::size_t operands);
   LogicalPlanBuilder &SetLimit(std::uint64_t limit);
   LogicalPlanBuilder &SetOffset(std::uint64_t offset);
 

@@ -33,8 +33,17 @@ public:
     if (absl::Status s = Expect(TokenType::kSelect); !s.ok())
       return s;
 
-    // SELECT * returns every column; the planner expands it.
-    if (Match(TokenType::kStar)) {
+    // SELECT COUNT(*) returns the encrypted match count, not rows.
+    if (Match(TokenType::kCount)) {
+      if (absl::Status s = Expect(TokenType::kLParen); !s.ok())
+        return s;
+      if (absl::Status s = Expect(TokenType::kStar); !s.ok())
+        return s;
+      if (absl::Status s = Expect(TokenType::kRParen); !s.ok())
+        return s;
+      stmt.count_star = true;
+    } else if (Match(TokenType::kStar)) {
+      // SELECT * returns every column; the planner expands it.
       stmt.select_all = true;
     } else {
       absl::StatusOr<std::vector<std::string>> cols = ParseColumns();
@@ -308,12 +317,10 @@ absl::StatusOr<PreparedQuery> PrepareClientQuery(std::string_view sql) {
   if (!tokens.ok())
     return tokens.status();
 
-  // In the supported single-equality grammar a literal can appear only as the
-  // match value, so the first literal token is the value to lift out. More than
-  // one literal means a multi-predicate template, which is not evaluable yet.
-  // The number after LIMIT or OFFSET is a public bound, not the match value, so
-  // skip it.
-  const Token *literal = nullptr;
+  // Literals can appear only as match values (an equality value or the entries
+  // of an IN list), so every literal token is a value to lift out, in order.
+  // The number after LIMIT or OFFSET is a public bound, not a value, so skip it.
+  std::vector<const Token *> literals;
   TokenType prev = TokenType::kEnd;
   for (const Token &tok : *tokens) {
     const TokenType cur = tok.type;
@@ -323,47 +330,50 @@ absl::StatusOr<PreparedQuery> PrepareClientQuery(std::string_view sql) {
       continue;
     }
     prev = cur;
-    if (tok.type != TokenType::kStringLiteral &&
-        tok.type != TokenType::kNumberLiteral)
-      continue;
-    if (literal != nullptr) {
-      return absl::UnimplementedError(
-          "a template with more than one literal is not yet supported");
-    }
-    literal = &tok;
+    if (tok.type == TokenType::kStringLiteral ||
+        tok.type == TokenType::kNumberLiteral)
+      literals.push_back(&tok);
   }
 
   PreparedQuery out;
   out.limit = stmt->limit;
   out.offset = stmt->offset;
-  if (literal == nullptr) {
+  out.count = stmt->count_star;
+  if (literals.empty()) {
     out.sql_template = std::string(src);
     return out; // already parameterized; nothing to strip
   }
 
-  // The literal value, typed the same way the parser would: a quoted token is
-  // text, a digit token is an integer.
-  if (literal->type == TokenType::kStringLiteral) {
-    out.literal = core::Value{literal->text};
-  } else {
-    std::int64_t v = 0;
-    if (!absl::SimpleAtoi(literal->text, &v)) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("number literal '", literal->text, "' is out of range"));
+  // Type and record each literal in source order, then splice a bound parameter
+  // over each. A single value is rewritten to ':v' (the historical form); a
+  // list to ':v0', ':v1', ... so the server's template parses back to the same
+  // IN / OR shape. Splice right-to-left so earlier byte offsets stay valid.
+  const bool single = literals.size() == 1;
+  for (const Token *lit : literals) {
+    if (lit->type == TokenType::kStringLiteral) {
+      out.literals.push_back(core::Value{lit->text});
+    } else {
+      std::int64_t v = 0;
+      if (!absl::SimpleAtoi(lit->text, &v)) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("number literal '", lit->text, "' is out of range"));
+      }
+      out.literals.push_back(core::Value{v});
     }
-    out.literal = core::Value{v};
   }
 
-  // Splice ':v' over the literal's source span. A string token's source spans
-  // its text plus the two surrounding quote characters; a number token's source
-  // is exactly its text.
-  const std::size_t begin = literal->pos;
-  const std::size_t span = literal->type == TokenType::kStringLiteral
-                               ? literal->text.size() + 2
-                               : literal->text.size();
-  out.param_name = "v";
-  out.sql_template = absl::StrCat(src.substr(0, begin), ":", out.param_name,
-                                  src.substr(begin + span));
+  std::string templated(src);
+  for (std::size_t i = literals.size(); i-- > 0;) {
+    const Token *lit = literals[i];
+    const std::size_t begin = lit->pos;
+    const std::size_t span = lit->type == TokenType::kStringLiteral
+                                 ? lit->text.size() + 2
+                                 : lit->text.size();
+    const std::string name = single ? "v" : absl::StrCat("v", i);
+    templated = absl::StrCat(templated.substr(0, begin), ":", name,
+                             templated.substr(begin + span));
+  }
+  out.sql_template = std::move(templated);
   return out;
 }
 

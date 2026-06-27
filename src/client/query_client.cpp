@@ -159,31 +159,39 @@ QueryClient::Insert(const std::string &database, const std::string &table,
   return InsertResult{reply.epoch_version(), reply.row_count()};
 }
 
-absl::StatusOr<std::vector<std::vector<std::uint8_t>>>
-QueryClient::Query(const std::string &client_id,
-                   const std::string &sql_template, std::uint64_t value,
-                   const std::string &backend_hint, const std::string &database,
-                   std::uint32_t *collided_buckets) {
-  // Lift any inline literal out of the template. The literal is the secret; it
-  // is encrypted here and the server only ever sees the parameterized form.
+absl::StatusOr<QueryClient::Decoded>
+QueryClient::RunQuery(const std::string &client_id,
+                      const std::string &sql_template, std::uint64_t value,
+                      const std::string &backend_hint,
+                      const std::string &database) {
+  // Lift inline literals out of the template. They are the secret values;
+  // encrypted here, the server only ever sees the parameterized form.
   absl::StatusOr<sql::PreparedQuery> prepared =
       sql::PrepareClientQuery(sql_template);
   if (!prepared.ok())
     return prepared.status();
 
-  // The match value is the lifted literal when present, otherwise the bound
-  // integer the caller passed.
-  const core::Value key = prepared->literal.has_value()
-                              ? *prepared->literal
-                              : core::Value{static_cast<std::int64_t>(value)};
+  // The match operands are the lifted literals when present (one for a point
+  // query, several for IN / OR), otherwise the single bound value the caller
+  // passed.
+  std::vector<core::Value> values;
+  if (prepared->literals.empty()) {
+    values.push_back(core::Value{static_cast<std::int64_t>(value)});
+  } else {
+    values = prepared->literals;
+  }
+  std::vector<std::uint64_t> universe;
+  universe.reserve(values.size());
+  for (const core::Value &v : values) {
+    absl::StatusOr<core::KeyEncoding> key_value =
+        core::EncodeKeyValue(core::ColumnTypeOf(v), v, cfg_.crypto.key_bits);
+    if (!key_value.ok())
+      return key_value.status();
+    universe.push_back(key_value->value);
+  }
 
-  absl::StatusOr<core::KeyEncoding> key_value =
-      core::EncodeKeyValue(core::ColumnTypeOf(key), key, cfg_.crypto.key_bits);
-  if (!key_value.ok())
-    return key_value.status();
-
-  absl::StatusOr<std::string> enc = crypto::BuildEncryptedOperand(
-      ctx_, keyring_.public_key(), key_value->value, cfg_.crypto.key_bits);
+  absl::StatusOr<std::string> enc = crypto::BuildEncryptedOperands(
+      ctx_, keyring_.public_key(), universe, cfg_.crypto.key_bits);
   if (!enc.ok())
     return enc.status();
 
@@ -203,17 +211,12 @@ QueryClient::Query(const std::string &client_id,
   }
 
   // The server partitioned matches into result_buckets buckets and packed every
-  // bucket into the one result blob. Decode them all into the matched rows (in
-  // bucket order, stable across queries), then apply LIMIT/OFFSET as a row
-  // skip/take. LIMIT thus counts rows, not bucket slots, and OFFSET pages
-  // through the matches. Default is LIMIT 1, OFFSET 0.
+  // bucket into the one result blob. Decode them all (in bucket order, stable
+  // across queries); the callers interpret the buckets as rows or as a count.
   const std::uint32_t buckets = cfg_.crypto.result_buckets;
-  const std::uint64_t offset = prepared->offset.value_or(0);
-  const std::uint64_t limit = prepared->limit.value_or(1);
-
   const std::uint32_t bps = cfg_.crypto.BytesPerSlot();
-  std::vector<std::vector<std::uint8_t>> matched;
-  std::uint32_t collided = 0;
+  Decoded out;
+  out.prepared = *std::move(prepared);
   for (const std::string &blob : reply.encrypted_result()) {
     absl::StatusOr<std::vector<crypto::BucketResult>> recs =
         crypto::DecryptResults(ctx_, keyring_.secret_key(), blob,
@@ -221,27 +224,65 @@ QueryClient::Query(const std::string &client_id,
                                bps, buckets, /*offset=*/0, /*limit=*/buckets);
     if (!recs.ok())
       return recs.status();
-    for (crypto::BucketResult &br : *recs) {
-      if (br.collided) {
-        ++collided; // two rows with the same key fell in one bucket
-        continue;
-      }
-      // An absent bucket means no row matched there; only present, clean
-      // buckets are matched rows.
-      if (br.present)
-        matched.push_back(std::move(br.record));
+    for (crypto::BucketResult &br : *recs)
+      out.buckets.push_back(std::move(br));
+  }
+  return out;
+}
+
+absl::StatusOr<std::vector<std::vector<std::uint8_t>>>
+QueryClient::Query(const std::string &client_id,
+                   const std::string &sql_template, std::uint64_t value,
+                   const std::string &backend_hint, const std::string &database,
+                   std::uint32_t *collided_buckets) {
+  absl::StatusOr<Decoded> decoded =
+      RunQuery(client_id, sql_template, value, backend_hint, database);
+  if (!decoded.ok())
+    return decoded.status();
+
+  std::vector<std::vector<std::uint8_t>> matched;
+  std::uint32_t collided = 0;
+  for (crypto::BucketResult &br : decoded->buckets) {
+    if (br.collided) {
+      ++collided; // two rows with the same key fell in one bucket
+      continue;
     }
+    // An absent bucket means no row matched there; only present, clean buckets
+    // are matched rows.
+    if (br.present)
+      matched.push_back(std::move(br.record));
   }
   if (collided_buckets != nullptr)
     *collided_buckets = collided;
 
-  // Apply the public row window: skip `offset` rows, take up to `limit`.
+  // Apply the public row window: skip `offset` rows, take up to `limit`. LIMIT
+  // counts rows, not bucket slots; default is LIMIT 1, OFFSET 0.
+  const std::uint64_t offset = decoded->prepared.offset.value_or(0);
+  const std::uint64_t limit = decoded->prepared.limit.value_or(1);
   std::vector<std::vector<std::uint8_t>> out;
   for (std::uint64_t i = offset; i < matched.size() && out.size() < limit;
        ++i) {
     out.push_back(std::move(matched[i]));
   }
   return out;
+}
+
+absl::StatusOr<std::uint64_t>
+QueryClient::QueryCount(const std::string &client_id,
+                        const std::string &sql_template, std::uint64_t value,
+                        const std::string &backend_hint,
+                        const std::string &database) {
+  absl::StatusOr<Decoded> decoded =
+      RunQuery(client_id, sql_template, value, backend_hint, database);
+  if (!decoded.ok())
+    return decoded.status();
+  // Every matching row contributes 1 to exactly one bucket's presence count, so
+  // summing the per-bucket counts is the exact total even when rows collide in
+  // a bucket (a collision corrupts the payload bytes, not the count).
+  std::uint64_t total = 0;
+  for (const crypto::BucketResult &br : decoded->buckets)
+    total += br.count;
+  return total;
 }
 
 } // namespace opaquedb::client

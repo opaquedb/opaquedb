@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/status/statusor.h"
 #include "opaquedb/core/record_codec.h"
@@ -40,9 +41,13 @@ absl::StatusOr<SelectStatement> Parse(std::string_view sql);
 // returned unchanged and literal is nullopt. Run on the client so a literal
 // value never crosses the wire.
 struct PreparedQuery {
-  std::string sql_template;           // parameterized, safe to send
-  std::optional<core::Value> literal; // the value to encrypt, if any
-  std::string param_name;             // the bound name used for the literal
+  std::string sql_template; // parameterized, safe to send
+  // The literal value(s) lifted out of the template, in left-to-right order, to
+  // be encrypted by the client. Empty when the template already used bound
+  // parameters. A single equality lifts one; IN / same-column OR lifts one per
+  // listed value (rewritten to :v0, :v1, ...).
+  std::vector<core::Value> literals;
+  bool count = false; // the statement is SELECT COUNT(*)
   // The LIMIT/OFFSET from the template, so the client knows how many result
   // buckets to decode and from where. Unset limit means the default of 1.
   std::optional<std::uint64_t> limit;

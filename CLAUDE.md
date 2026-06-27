@@ -202,9 +202,11 @@ is not projectable. `load --schema f.sql --csv f.csv [--database D]` ingests (CS
 header names columns); `examples/weather.{sql,csv}` (`id` INT key; `city`,
 `country`, `conditions` TEXT INDEX) is the worked example. A secondary-index query
 fans out to every shard and combines exactly like a key query (data is sharded by
-the primary key, so each row lives on one shard and the sum never double-counts);
-conjunctive `col1=a AND col2=b` is not yet supported (the planner still rejects
-AND).
+the primary key, so each row lives on one shard and the sum never double-counts).
+`WHERE col IN (...)` and a flat same-column `OR` (`col=a OR col=b`) are supported
+as a multi-operand union on one column (see the matcher note); `OR` across
+different columns and conjunctive `col1=a AND col2=b` are not yet supported (the
+planner rejects cross-column OR and AND).
 
 **Query path and CLI.** WHERE takes a bound param (`:name`) or an inline literal
 (`= "London"`). A literal is the secret value, so it is client-side sugar:
@@ -215,7 +217,12 @@ optional, public, and parsed into the plan (default `LIMIT 1`, no offset). There
 is one wire client,
 `client::QueryClient::Query(client_id, sql, value, backend_hint, database,
 collided_out)` (table from SQL, db default "default"); the `query` and `repl`
-commands and both examples use it (the old `server::DevClient` was deleted). All CLI parsing is
+commands and both examples use it (the old `server::DevClient` was deleted). For
+`IN`/`OR` the client lifts every inline literal (rewriting to `:v0, :v1, ...`)
+and encrypts one operand per value via `crypto::BuildEncryptedOperands`.
+`SELECT COUNT(*)` goes through `QueryClient::QueryCount`, which sums the
+per-bucket presence counts (exact even under bucket collisions) and the CLI
+renders the single number. All CLI parsing is
 CLI11; command files live under `src/cli/commands/`; shared helpers (`LoadConfig`
 for config+logging, `ReadFile`, the row renderers `RenderRaw`/`RenderWithSchema`)
 live in `src/cli/util.{h,cpp}`. `repl` registers keys once then runs each SELECT
@@ -237,12 +244,24 @@ cross-block bleed), then per payload plane a `multiply_plain` by the packed
 payload and a per-bucket block-sum. The two slot rows are not merged with
 rotate_columns; the matched payload lands in a bucket of one row and the client
 sums the two rows' bucket. Only `1 + log2(key_bits)` ct*ct multiplies per batch
-(depth 5 at key_bits 16), independent of batch size; the query is ONE ciphertext
-(value bit-expanded and tiled across all slots). `combine`/`CombinePartials` add
-shard partials plane-wise. Empty-result control: the backend appends a "presence"
-ciphertext (`sum_r b_r` per bucket, the match count); the client reads it first
-and returns no record for a zero-count bucket, so a no-match is an encrypted
-empty result and the operator never learns whether a query matched.
+(depth 5 at key_bits 16), independent of batch size. `EncryptedQuery` carries a
+primary operand plus `extra_operands`: for `IN`/same-column `OR` the matcher
+computes one equality indicator per operand and SUMS them (a key equals at most
+one listed value, so the indicators are disjoint and the union adds no
+multiplicative depth, only one square+AND-tree per extra operand). Each operand
+is ONE ciphertext (value bit-expanded and tiled across all slots).
+Performance: the multiplicative depth is spent once the indicator is built, so
+the matcher drops one prime (`mod_switch_to_next`) before the occupancy mask,
+broadcast, and block-sum; and it runs the independent batches across worker
+threads (one per core) with per-thread accumulators reduced at the end. Because
+partials/results are then below the top of the modulus chain,
+`DeserializeCiphertexts` takes a `require_top_level` flag (true only for the
+fresh client operand). `combine`/`CombinePartials` add shard partials
+plane-wise. Empty-result control: the backend appends a "presence" ciphertext
+(`sum_r b_r` per bucket, the match count); the client reads it first and returns
+no record for a zero-count bucket, so a no-match is an encrypted empty result and
+the operator never learns whether a query matched. `SELECT COUNT(*)` reuses this
+presence: the client sums it across buckets.
 
 **Multi-result, LIMIT/OFFSET (`crypto.result_buckets`, default 16).** Rows are
 partitioned into `result_buckets` buckets (a power of two, at most
@@ -281,8 +300,11 @@ uses (`core::RequiredGaloisSteps`: +/- power-of-two AND/broadcast plus block-sum
 full set for benches). The reduced Galois set is ~125 MB at poly 16384 (relin
 ~7.5 MB, public ~1.5 MB), too big for one gRPC message: `Register` streams it in
 4 MB chunks and the coordinator forwards it to peers over a streaming
-`RegisterKeys` RPC. Key distribution is the coordinator's job; the production path
-is a shared object store (`BlobStoreConfig`, MinIO/S3) — see the TODO in
+`RegisterKeys` RPC. Keys are generated and serialized in SEAL's seeded
+`Serializable<T>` form (the second polynomial becomes a 32-byte seed), which
+roughly halves these sizes on the wire; the local accessors load the seeded
+bytes back. Key distribution is the coordinator's job; the production path is a
+shared object store (`BlobStoreConfig`, MinIO/S3) — see the TODO in
 `query_service.cpp`.
 
 **Storage.** Per table:
@@ -297,7 +319,13 @@ it; `storage::Catalog` enumerates dbs/tables under `Config::DatabasesDir()`. On
 the node `server::RepositoryManager` caches one repo per `core::TableId` and
 `Engine` routes per query (the legacy single-repo `Engine::Create` overload still
 serves tests). Publish writes a temp dir, renames atomically, swaps CURRENT;
-epochs are immutable. Segments are 64-byte header + fixed records, CRC32-checked;
+epochs are immutable. A writer holds the repo's `write_mutex()` for the whole
+read-modify-publish so two concurrent inserts cannot lose an update or race the
+next version (insert and `AdminService::Publish` both take it). Insert republishes
+the whole table each time, so it calls `EpochRepository::Prune(keep)` afterward
+to drop all but the most recent epochs (CURRENT always survives a rollback
+window); unlinking an epoch a reader still has mapped is safe on POSIX.
+Segments are 64-byte header + fixed records, CRC32-checked;
 the mmap reader validates declared geometry against the real file size before
 exposing any record. The WAL is length+CRC framed and replays only its valid
 prefix (torn-tail safe). The private header is `little_endian.h`, not `endian.h`
@@ -335,10 +363,14 @@ is not in the pinned baseline, so it is vendored as an overlay port in
 shard-map publish (a thread in production); `cluster.enabled` (default false)
 gates joining. Query path: `Engine::EvaluateShard` (per-shard, no combine) +
 `CombinePartials`; `ShardService` is the node-to-node Evaluate + RegisterKeys
-RPC; `QueryCoordinator` evaluates the local shard, fans out to peers, and
-combines. `QueryService` coordinates per request: peers come from etcd membership
-(`cluster.enabled`) or a static `SetQueryPeers` (tests), and `Register` forwards
-keys to every peer. Peers are reached at `server.advertise` (set it when binding
+RPC; `QueryCoordinator` evaluates the local shard and fans out to peers
+concurrently (one worker thread per peer, its own shard on another), then
+combines; one slow shard no longer serializes behind the others. `QueryService`
+coordinates per request: peers come from etcd membership (`cluster.enabled`) or a
+static `SetQueryPeers` (tests), and `Register` forwards keys to every peer. Peer
+gRPC channels are pooled (cached by address, reused across queries instead of
+rebuilt), and the etcd membership/epoch the resolvers read is cached for a 1s TTL
+so a burst of queries does not hit etcd per request. Peers are reached at `server.advertise` (set it when binding
 a wildcard). Data must be sharded disjoint (consistent hash) for combine to be
 correct; replicating the full set would double-count. `load --shard-id N
 --shard-nodes a,b,c` loads a node's shard; `docker/docker-compose.yml` uses this.

@@ -31,6 +31,11 @@ struct PhysicalPlan {
   std::string match_column;
   std::size_t match_column_index = 0;
   std::string parameter; // the bound parameter naming the encrypted value
+  // How many encrypted operands the match carries (1 for a point query, more
+  // for IN / same-column OR). The engine deserializes exactly this many.
+  std::size_t match_operands = 1;
+  // SELECT COUNT(*): the client reads the encrypted match count, not rows.
+  bool count = false;
 
   std::vector<std::string> projection;
   std::vector<std::size_t> projection_indices;

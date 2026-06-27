@@ -3,7 +3,10 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "grpcpp/grpcpp.h"
@@ -60,12 +63,20 @@ public:
                              proto::DescribeReply *reply) override;
 
 private:
+  // Returns a channel to a peer shard, creating it on first use and reusing it
+  // afterwards. gRPC channels are thread-safe and meant to be long-lived;
+  // rebuilding one per query threw away the HTTP/2 connection, its TLS
+  // handshake, and the warm flow-control window every time.
+  std::shared_ptr<grpc::Channel> PeerChannelFor(const std::string &address);
+
   Engine *engine_;
   RequestGate *gate_;
   PeerResolver peers_;
   EpochResolver epoch_;
   std::uint64_t max_message_bytes_;
   std::shared_ptr<grpc::ChannelCredentials> peer_creds_;
+  std::mutex channels_mu_;
+  std::unordered_map<std::string, std::shared_ptr<grpc::Channel>> channels_;
 };
 
 } // namespace opaquedb::server

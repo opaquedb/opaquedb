@@ -197,11 +197,13 @@ void ReplCommand::Register(CLI::App &parent, const GlobalOptions &globals,
       // Parse the projection and table so results show only the selected
       // columns, and fetch (and cache) the table's schema to decode rows.
       std::vector<std::string> projection;
+      bool count_star = false;
       const core::Schema *render_schema = have_schema ? &schema : nullptr;
       if (absl::StatusOr<sql::SelectStatement> stmt =
               sql::Parse(std::string(trimmed));
           stmt.ok()) {
         projection = stmt->projection;
+        count_star = stmt->count_star;
         const std::string key = database + "." + stmt->table;
         auto it = schema_cache.find(key);
         if (it == schema_cache.end()) {
@@ -213,6 +215,19 @@ void ReplCommand::Register(CLI::App &parent, const GlobalOptions &globals,
         }
         if (it != schema_cache.end())
           render_schema = &it->second;
+      }
+
+      // COUNT(*) renders a single number from the encrypted match count.
+      if (count_star) {
+        absl::StatusOr<std::uint64_t> n = (*client)->QueryCount(
+            client_id_, std::string(trimmed), /*value=*/0,
+            /*backend_hint=*/"", database);
+        if (!n.ok()) {
+          std::cout << "error: " << n.status().message() << "\n";
+          continue;
+        }
+        std::cout << *n << "\n";
+        continue;
       }
 
       std::uint32_t collided = 0;

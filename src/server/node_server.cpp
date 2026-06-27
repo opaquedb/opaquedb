@@ -168,27 +168,14 @@ absl::Status NodeServer::Start() {
   // (from etcd membership when clustered, otherwise the static list) and the
   // global epoch to pin to.
   auto peer_resolver = [this]() -> std::vector<std::string> {
-    if (cluster_ != nullptr) {
-      absl::StatusOr<std::vector<cluster::NodeInfo>> members =
-          cluster_->Members();
-      if (!members.ok())
-        return {};
-      std::vector<std::string> peers;
-      for (const cluster::NodeInfo &node : *members) {
-        if (node.address != advertise_address_)
-          peers.push_back(node.address);
-      }
-      return peers;
-    }
+    if (cluster_ != nullptr)
+      return ClusterViewCached().peers;
     std::lock_guard<std::mutex> lock(peers_mutex_);
     return query_peers_;
   };
   auto epoch_resolver = [this]() -> std::uint64_t {
-    if (cluster_ != nullptr) {
-      absl::StatusOr<std::uint64_t> epoch = cluster_->CurrentEpoch();
-      if (epoch.ok())
-        return *epoch;
-    }
+    if (cluster_ != nullptr)
+      return ClusterViewCached().epoch;
     return 0;
   };
   peer_creds_ = MakePeerChannelCredentials(config_);
@@ -295,6 +282,39 @@ void NodeServer::Wait() {
 void NodeServer::SetQueryPeers(std::vector<std::string> peers) {
   std::lock_guard<std::mutex> lock(peers_mutex_);
   query_peers_ = std::move(peers);
+}
+
+NodeServer::ClusterView NodeServer::ClusterViewCached() {
+  // A short TTL: long enough that a burst of queries shares one etcd round
+  // trip, short enough that a membership or epoch change propagates within a
+  // second. Failure detection still runs on the cluster lease, not here.
+  constexpr auto kTtl = std::chrono::milliseconds(1000);
+  const auto now = std::chrono::steady_clock::now();
+  {
+    std::lock_guard<std::mutex> lock(cluster_cache_mu_);
+    if (cluster_cache_valid_ && now - cluster_cache_at_ < kTtl)
+      return cluster_cache_;
+  }
+
+  // Refresh outside the lock so a slow etcd read does not block other queries
+  // reading the cache. A failed read yields an empty view rather than throwing.
+  ClusterView view;
+  if (absl::StatusOr<std::vector<cluster::NodeInfo>> members =
+          cluster_->Members();
+      members.ok()) {
+    for (const cluster::NodeInfo &node : *members) {
+      if (node.address != advertise_address_)
+        view.peers.push_back(node.address);
+    }
+  }
+  if (absl::StatusOr<std::uint64_t> epoch = cluster_->CurrentEpoch(); epoch.ok())
+    view.epoch = *epoch;
+
+  std::lock_guard<std::mutex> lock(cluster_cache_mu_);
+  cluster_cache_ = view;
+  cluster_cache_at_ = now;
+  cluster_cache_valid_ = true;
+  return view;
 }
 
 void NodeServer::Shutdown() {

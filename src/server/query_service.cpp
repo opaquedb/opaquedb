@@ -33,6 +33,18 @@ PeerChannel(const std::string &address, std::uint64_t max_message_bytes,
 
 } // namespace
 
+std::shared_ptr<grpc::Channel>
+QueryService::PeerChannelFor(const std::string &address) {
+  std::lock_guard<std::mutex> lock(channels_mu_);
+  auto it = channels_.find(address);
+  if (it != channels_.end())
+    return it->second;
+  std::shared_ptr<grpc::Channel> channel =
+      PeerChannel(address, max_message_bytes_, peer_creds_);
+  channels_.emplace(address, channel);
+  return channel;
+}
+
 grpc::Status ToGrpcStatus(const absl::Status &status) {
   if (status.ok())
     return grpc::Status::OK;
@@ -156,8 +168,7 @@ QueryService::Register(grpc::ServerContext *context,
                  key_peers.size());
   }
   for (const std::string &peer : key_peers) {
-    auto stub = proto::Internal::NewStub(
-        PeerChannel(peer, max_message_bytes_, peer_creds_));
+    auto stub = proto::Internal::NewStub(PeerChannelFor(peer));
     grpc::ClientContext ctx;
     proto::KeyUploadReply ack;
     std::unique_ptr<grpc::ClientWriter<proto::KeyUploadChunk>> w(
@@ -210,7 +221,7 @@ grpc::Status QueryService::Execute(grpc::ServerContext *context,
     std::vector<std::shared_ptr<grpc::Channel>> channels;
     channels.reserve(peers.size());
     for (const std::string &peer : peers) {
-      channels.push_back(PeerChannel(peer, max_message_bytes_, peer_creds_));
+      channels.push_back(PeerChannelFor(peer));
     }
     QueryCoordinator coordinator(engine_, std::move(channels), epoch_(),
                                  max_message_bytes_);

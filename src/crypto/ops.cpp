@@ -52,29 +52,54 @@ absl::StatusOr<int> NoiseBudgetBits(const CryptoContext &ctx,
   }
 }
 
-absl::StatusOr<std::string> BuildEncryptedOperand(const CryptoContext &ctx,
-                                                  const seal::PublicKey &pub,
-                                                  std::uint64_t value,
-                                                  std::uint32_t key_bits) {
-  if (key_bits == 0 || key_bits > 64) {
-    return absl::InvalidArgumentError("key_bits must be in [1, 64]");
-  }
-  // The query value's bits, tiled across every slot so each record's block of
-  // key_bits slots compares against the same value. slot i holds bit i %
-  // key_bits.
+namespace {
+
+// Encrypts one lookup value into the tiled operand ciphertext: the value's bits
+// repeated across every slot so each record's block of key_bits slots compares
+// against the same value (slot i holds bit i % key_bits).
+absl::StatusOr<seal::Ciphertext> EncryptOperand(const CryptoContext &ctx,
+                                                const seal::PublicKey &pub,
+                                                std::uint64_t value,
+                                                std::uint32_t key_bits) {
   const std::vector<std::uint64_t> bits = core::KeyToBits(value, key_bits);
   std::vector<std::uint64_t> slots(ctx.slot_count());
   for (std::size_t i = 0; i < slots.size(); ++i)
     slots[i] = bits[i % key_bits];
-
   absl::StatusOr<seal::Plaintext> plain = ctx.EncodeBatch(slots);
   if (!plain.ok())
     return plain.status();
-  absl::StatusOr<seal::Ciphertext> cipher = Encrypt(ctx, pub, *plain);
-  if (!cipher.ok())
-    return cipher.status();
-  return SerializeCiphertexts(
-      std::vector<seal::Ciphertext>{*std::move(cipher)});
+  return Encrypt(ctx, pub, *plain);
+}
+
+} // namespace
+
+absl::StatusOr<std::string> BuildEncryptedOperand(const CryptoContext &ctx,
+                                                  const seal::PublicKey &pub,
+                                                  std::uint64_t value,
+                                                  std::uint32_t key_bits) {
+  return BuildEncryptedOperands(ctx, pub, {value}, key_bits);
+}
+
+absl::StatusOr<std::string>
+BuildEncryptedOperands(const CryptoContext &ctx, const seal::PublicKey &pub,
+                       const std::vector<std::uint64_t> &values,
+                       std::uint32_t key_bits) {
+  if (key_bits == 0 || key_bits > 64) {
+    return absl::InvalidArgumentError("key_bits must be in [1, 64]");
+  }
+  if (values.empty()) {
+    return absl::InvalidArgumentError("operand list is empty");
+  }
+  std::vector<seal::Ciphertext> ciphers;
+  ciphers.reserve(values.size());
+  for (std::uint64_t value : values) {
+    absl::StatusOr<seal::Ciphertext> cipher =
+        EncryptOperand(ctx, pub, value, key_bits);
+    if (!cipher.ok())
+      return cipher.status();
+    ciphers.push_back(*std::move(cipher));
+  }
+  return SerializeCiphertexts(ciphers);
 }
 
 absl::StatusOr<std::vector<BucketResult>>
@@ -90,8 +115,8 @@ DecryptResults(const CryptoContext &ctx, const seal::SecretKey &sk,
       core::PayloadPlaneCount(record_bytes, key_bits, bytes_per_slot);
   // planes payload ciphertexts plus one trailing presence ciphertext.
   const std::uint32_t expected = planes + 1;
-  absl::StatusOr<std::vector<seal::Ciphertext>> ciphers =
-      DeserializeCiphertexts(ctx, encrypted_blob, /*max_count=*/expected);
+  absl::StatusOr<std::vector<seal::Ciphertext>> ciphers = DeserializeCiphertexts(
+      ctx, encrypted_blob, /*max_count=*/expected, /*require_top_level=*/false);
   if (!ciphers.ok())
     return ciphers.status();
   if (ciphers->size() != expected) {
@@ -149,6 +174,7 @@ DecryptResults(const CryptoContext &ctx, const seal::SecretKey &sk,
     const std::size_t base = static_cast<std::size_t>(g) * stride;
     const std::vector<std::uint64_t> pres = bucket_block(planes, base);
     BucketResult br;
+    br.count = pres[0]; // matches in this bucket; for COUNT(*) the client sums
     if (pres[0] == 0) {
       out.push_back(std::move(br)); // empty bucket
       continue;

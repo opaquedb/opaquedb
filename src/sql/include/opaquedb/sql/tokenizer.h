@@ -24,6 +24,7 @@ inline constexpr std::size_t kMaxIdentifierLength = 256;
 
 enum class TokenType {
   kSelect,
+  kCount, // COUNT, only as the aggregate COUNT(*)
   kFrom,
   kWhere,
   kAnd,
