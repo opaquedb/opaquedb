@@ -322,8 +322,11 @@ absl::StatusOr<std::vector<std::string>> Engine::CombinePartials(
     std::vector<seal::Ciphertext> ciphers;
     ciphers.reserve(shard.size());
     for (const std::string &blob : shard) {
+      // Shard partials are server-produced and have been mod-switched down the
+      // modulus chain by the matcher, so they are not fresh top-level operands.
       absl::StatusOr<std::vector<seal::Ciphertext>> one =
-          crypto::DeserializeCiphertexts(ctx_, blob, /*max_count=*/1);
+          crypto::DeserializeCiphertexts(ctx_, blob, /*max_count=*/1,
+                                         /*require_top_level=*/false);
       if (!one.ok())
         return one.status();
       if (one->size() != 1) {

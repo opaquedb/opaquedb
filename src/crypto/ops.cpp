@@ -90,8 +90,8 @@ DecryptResults(const CryptoContext &ctx, const seal::SecretKey &sk,
       core::PayloadPlaneCount(record_bytes, key_bits, bytes_per_slot);
   // planes payload ciphertexts plus one trailing presence ciphertext.
   const std::uint32_t expected = planes + 1;
-  absl::StatusOr<std::vector<seal::Ciphertext>> ciphers =
-      DeserializeCiphertexts(ctx, encrypted_blob, /*max_count=*/expected);
+  absl::StatusOr<std::vector<seal::Ciphertext>> ciphers = DeserializeCiphertexts(
+      ctx, encrypted_blob, /*max_count=*/expected, /*require_top_level=*/false);
   if (!ciphers.ok())
     return ciphers.status();
   if (ciphers->size() != expected) {

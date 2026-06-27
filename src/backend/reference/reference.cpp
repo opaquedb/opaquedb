@@ -5,6 +5,7 @@
 #include <exception>
 #include <memory>
 #include <span>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -223,127 +224,199 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
     if (!zero_ct.ok())
       return zero_ct.status();
 
+    // Drops a ciphertext one prime down the modulus chain if it is not already
+    // at the last level. The multiplicative depth is spent by the time the
+    // indicator is built, so the payload multiply and the rotation-heavy
+    // block-sum no longer need the top modulus; a smaller modulus makes every
+    // remaining rotation (a Galois key-switch) and multiply cheaper. The
+    // accumulators are dropped the same single step so the final adds line up.
+    const seal::Evaluator &ev = *evaluator_;
+    const seal::SEALContext &seal_ctx = ctx_.seal();
+    auto drop_one = [&ev, &seal_ctx](seal::Ciphertext &c) {
+      auto data = seal_ctx.get_context_data(c.parms_id());
+      if (data && data->next_context_data())
+        ev.mod_switch_to_next_inplace(c);
+    };
+    drop_one(*zero_ct);
+
     // One ciphertext per payload plane, plus a trailing "presence" ciphertext
     // that accumulates sum_r b_r (the number of matching records). The client
     // reads presence first: a count of zero means no row matched, so it returns
     // an empty result instead of decoding the all-zero payload as a real
     // record.
-    std::vector<seal::Ciphertext> acc(planes + 1, *zero_ct);
     const std::uint32_t presence_idx = planes;
+    const std::vector<seal::Ciphertext> seed(planes + 1, *zero_ct);
 
-    for (const std::vector<std::pair<std::size_t, std::size_t>> &items :
-         batched_rows) {
-      // Build the key plaintext (each row's bits at its assigned slot) and the
-      // occupancy mask (a 1 at every occupied block start). The mask, not a
-      // static every-block-start mask, gates the indicator: empty block slots
-      // hold key 0, which would otherwise spuriously match a query for value 0
-      // and inflate the count, so only occupied blocks survive.
-      std::vector<std::uint64_t> key_slots(N, 0);
-      std::vector<std::uint64_t> start_mask(N, 0);
-      for (const std::pair<std::size_t, std::size_t> &item : items) {
-        const std::vector<std::uint64_t> bits =
-            core::KeyToBits(keys.keys[item.first], kb);
-        const std::size_t at = item.second;
-        for (std::uint32_t b = 0; b < kb; ++b)
-          key_slots[at + b] = bits[b];
-        start_mask[at] = 1;
-      }
-      absl::StatusOr<seal::Plaintext> key_pt = ctx_.EncodeBatch(key_slots);
-      if (!key_pt.ok())
-        return key_pt.status();
-      absl::StatusOr<seal::Plaintext> start_pt = ctx_.EncodeBatch(start_mask);
-      if (!start_pt.ok())
-        return start_pt.status();
-
-      // sel = 1 - (query - key)^2, AND-reduced across each block.
-      seal::Ciphertext sel = query.query;
-      evaluator_->sub_plain_inplace(sel, *key_pt);
-      evaluator_->square_inplace(sel);
-      evaluator_->relinearize_inplace(sel, relin);
-      evaluator_->negate_inplace(sel);
-      evaluator_->add_plain_inplace(sel, *ones_pt);
-      for (int i = 0; i < levels; ++i) {
-        seal::Ciphertext rot;
-        evaluator_->rotate_rows(sel, 1 << i, gal, rot);
-        evaluator_->multiply_inplace(sel, rot);
-        evaluator_->relinearize_inplace(sel, relin);
-      }
-      // Keep the indicator at occupied block starts, then broadcast it across
-      // each block by a doubling prefix-sum. The window grows to exactly
-      // key_bits wide, and block starts are key_bits apart, so each slot's
-      // window holds exactly one start: no cross-block bleed, and no plaintext
-      // multiplies to spend noise.
-      evaluator_->multiply_plain_inplace(sel, *start_pt);
-      for (int i = 0; i < levels; ++i) {
-        seal::Ciphertext rot;
-        evaluator_->rotate_rows(sel, -(1 << i), gal, rot);
-        evaluator_->add_inplace(sel, rot);
-      }
-
-      for (std::uint32_t p = 0; p < planes; ++p) {
-        // Pack plane p of each row's payload into its assigned block.
-        std::vector<std::uint64_t> pay_slots(N, 0);
-        const std::uint32_t lo = p * bytes_per_block;
-        const std::uint32_t hi =
-            std::min(record_bytes, (p + 1) * bytes_per_block);
+    // Evaluates one batch into its own accumulator vector `local` (pre-seeded
+    // with encryptions of zero at the dropped level). Batches are independent,
+    // so several run concurrently, each owning its scratch and writing only its
+    // own `local`; the SEAL Evaluator and BatchEncoder are used read-only and
+    // are safe to share. Exceptions are caught here so a worker thread never
+    // escapes with one.
+    auto process_batch =
+        [&](const std::vector<std::pair<std::size_t, std::size_t>> &items,
+            std::vector<seal::Ciphertext> &local) -> absl::Status {
+      try {
+        // Build the key plaintext (each row's bits at its assigned slot) and
+        // the occupancy mask (a 1 at every occupied block start). The mask, not
+        // a static every-block-start mask, gates the indicator: empty block
+        // slots hold key 0, which would otherwise spuriously match a query for
+        // value 0 and inflate the count, so only occupied blocks survive.
+        std::vector<std::uint64_t> key_slots(N, 0);
+        std::vector<std::uint64_t> start_mask(N, 0);
         for (const std::pair<std::size_t, std::size_t> &item : items) {
-          const std::vector<std::uint8_t> &rec = payload.rows[item.first];
-          if (lo >= rec.size())
-            continue;
-          const std::uint32_t end = std::min<std::uint32_t>(
-              hi, static_cast<std::uint32_t>(rec.size()));
-          absl::StatusOr<std::vector<std::uint64_t>> packed =
-              core::PackBytesToSlots(
-                  std::span<const std::uint8_t>(rec.data() + lo, end - lo),
-                  bps);
-          if (!packed.ok())
-            return packed.status();
+          const std::vector<std::uint64_t> bits =
+              core::KeyToBits(keys.keys[item.first], kb);
           const std::size_t at = item.second;
-          for (std::size_t s = 0; s < packed->size(); ++s)
-            pay_slots[at + s] = (*packed)[s];
+          for (std::uint32_t b = 0; b < kb; ++b)
+            key_slots[at + b] = bits[b];
+          start_mask[at] = 1;
         }
-        // A plane with no data in this batch contributes nothing. Skipping it
-        // also avoids multiply_plain by an all-zero plaintext (a transparent
-        // ciphertext). acc[p] is already a valid encryption of zero.
-        bool any = false;
-        for (std::uint64_t v : pay_slots)
-          if (v != 0) {
-            any = true;
-            break;
+        absl::StatusOr<seal::Plaintext> key_pt = ctx_.EncodeBatch(key_slots);
+        if (!key_pt.ok())
+          return key_pt.status();
+        absl::StatusOr<seal::Plaintext> start_pt = ctx_.EncodeBatch(start_mask);
+        if (!start_pt.ok())
+          return start_pt.status();
+
+        // sel = 1 - (query - key)^2, AND-reduced across each block.
+        seal::Ciphertext sel = query.query;
+        ev.sub_plain_inplace(sel, *key_pt);
+        ev.square_inplace(sel);
+        ev.relinearize_inplace(sel, relin);
+        ev.negate_inplace(sel);
+        ev.add_plain_inplace(sel, *ones_pt);
+        for (int i = 0; i < levels; ++i) {
+          seal::Ciphertext rot;
+          ev.rotate_rows(sel, 1 << i, gal, rot);
+          ev.multiply_inplace(sel, rot);
+          ev.relinearize_inplace(sel, relin);
+        }
+        // The indicator is final: no more ct*ct multiplies follow, so drop a
+        // prime before the occupancy mask, the broadcast, and the block-sum.
+        drop_one(sel);
+        // Keep the indicator at occupied block starts, then broadcast it across
+        // each block by a doubling prefix-sum. The window grows to exactly
+        // key_bits wide, and block starts are key_bits apart, so each slot's
+        // window holds exactly one start: no cross-block bleed, and no
+        // plaintext multiplies to spend noise.
+        ev.multiply_plain_inplace(sel, *start_pt);
+        for (int i = 0; i < levels; ++i) {
+          seal::Ciphertext rot;
+          ev.rotate_rows(sel, -(1 << i), gal, rot);
+          ev.add_inplace(sel, rot);
+        }
+
+        for (std::uint32_t p = 0; p < planes; ++p) {
+          // Pack plane p of each row's payload into its assigned block.
+          std::vector<std::uint64_t> pay_slots(N, 0);
+          const std::uint32_t lo = p * bytes_per_block;
+          const std::uint32_t hi =
+              std::min(record_bytes, (p + 1) * bytes_per_block);
+          for (const std::pair<std::size_t, std::size_t> &item : items) {
+            const std::vector<std::uint8_t> &rec = payload.rows[item.first];
+            if (lo >= rec.size())
+              continue;
+            const std::uint32_t end = std::min<std::uint32_t>(
+                hi, static_cast<std::uint32_t>(rec.size()));
+            absl::StatusOr<std::vector<std::uint64_t>> packed =
+                core::PackBytesToSlots(
+                    std::span<const std::uint8_t>(rec.data() + lo, end - lo),
+                    bps);
+            if (!packed.ok())
+              return packed.status();
+            const std::size_t at = item.second;
+            for (std::size_t s = 0; s < packed->size(); ++s)
+              pay_slots[at + s] = (*packed)[s];
           }
-        if (!any)
-          continue;
+          // A plane with no data in this batch contributes nothing. Skipping it
+          // also avoids multiply_plain by an all-zero plaintext (a transparent
+          // ciphertext). local[p] is already a valid encryption of zero.
+          bool any = false;
+          for (std::uint64_t v : pay_slots)
+            if (v != 0) {
+              any = true;
+              break;
+            }
+          if (!any)
+            continue;
 
-        absl::StatusOr<seal::Plaintext> pay_pt = ctx_.EncodeBatch(pay_slots);
-        if (!pay_pt.ok())
-          return pay_pt.status();
+          absl::StatusOr<seal::Plaintext> pay_pt = ctx_.EncodeBatch(pay_slots);
+          if (!pay_pt.ok())
+            return pay_pt.status();
 
-        seal::Ciphertext out = sel;
-        evaluator_->multiply_plain_inplace(out, *pay_pt);
-        // Sum the blocks within each bucket into the bucket's first block. The
-        // doubling sum stops at the bucket width (stride): with buckets == 1
-        // that is the whole row (every block folds into block 0); with more
-        // buckets it leaves one partial sum per bucket, spaced stride apart. We
-        // do not rotate columns to merge the two rows; the client sums the two
-        // rows' bucket g (only one side is nonzero per matched row).
+          seal::Ciphertext out = sel;
+          ev.multiply_plain_inplace(out, *pay_pt);
+          // Sum the blocks within each bucket into the bucket's first block.
+          // The doubling sum stops at the bucket width (stride): with buckets
+          // == 1 that is the whole row (every block folds into block 0); with
+          // more buckets it leaves one partial sum per bucket, spaced stride
+          // apart. We do not rotate columns to merge the two rows; the client
+          // sums the two rows' bucket g (only one side is nonzero per match).
+          for (std::size_t step = kb; step < stride; step <<= 1) {
+            seal::Ciphertext rot;
+            ev.rotate_rows(out, static_cast<int>(step), gal, rot);
+            ev.add_inplace(out, rot);
+          }
+          ev.add_inplace(local[p], out);
+        }
+
+        // Presence: the same per-bucket sum of the broadcast indicator, so each
+        // bucket's first block holds the number of rows matching in that
+        // bucket. No plaintext multiply, so this never goes transparent.
+        seal::Ciphertext pres = sel;
         for (std::size_t step = kb; step < stride; step <<= 1) {
           seal::Ciphertext rot;
-          evaluator_->rotate_rows(out, static_cast<int>(step), gal, rot);
-          evaluator_->add_inplace(out, rot);
+          ev.rotate_rows(pres, static_cast<int>(step), gal, rot);
+          ev.add_inplace(pres, rot);
         }
-        evaluator_->add_inplace(acc[p], out);
+        ev.add_inplace(local[presence_idx], pres);
+        return absl::OkStatus();
+      } catch (const std::exception &e) {
+        return absl::InternalError(
+            absl::StrCat("reference backend batch failed: ", e.what()));
       }
+    };
 
-      // Presence: the same per-bucket sum of the broadcast indicator, so each
-      // bucket's first block holds the number of rows matching in that bucket.
-      // No plaintext multiply, so this never goes transparent.
-      seal::Ciphertext pres = sel;
-      for (std::size_t step = kb; step < stride; step <<= 1) {
-        seal::Ciphertext rot;
-        evaluator_->rotate_rows(pres, static_cast<int>(step), gal, rot);
-        evaluator_->add_inplace(pres, rot);
+    // Run the batches. One batch (small tables) stays serial; otherwise split
+    // them across worker threads, each with its own accumulator, then reduce.
+    unsigned hw = std::thread::hardware_concurrency();
+    std::size_t nthreads = std::min<std::size_t>(
+        batched_rows.size(), hw == 0 ? 1u : static_cast<std::size_t>(hw));
+
+    std::vector<seal::Ciphertext> acc = seed;
+    if (nthreads <= 1) {
+      for (const auto &items : batched_rows) {
+        absl::Status s = process_batch(items, acc);
+        if (!s.ok())
+          return s;
       }
-      evaluator_->add_inplace(acc[presence_idx], pres);
+    } else {
+      std::vector<std::vector<seal::Ciphertext>> locals(nthreads, seed);
+      std::vector<absl::Status> statuses(nthreads, absl::OkStatus());
+      std::vector<std::thread> pool;
+      pool.reserve(nthreads);
+      for (std::size_t t = 0; t < nthreads; ++t) {
+        pool.emplace_back([&, t]() {
+          for (std::size_t i = t; i < batched_rows.size(); i += nthreads) {
+            absl::Status s = process_batch(batched_rows[i], locals[t]);
+            if (!s.ok()) {
+              statuses[t] = s;
+              return;
+            }
+          }
+        });
+      }
+      for (std::thread &th : pool)
+        th.join();
+      for (const absl::Status &s : statuses)
+        if (!s.ok())
+          return s;
+      // Reduce the per-thread accumulators plane-wise. Adding the extra
+      // encryptions of zero costs negligible noise.
+      for (std::size_t t = 0; t < nthreads; ++t)
+        for (std::uint32_t p = 0; p <= planes; ++p)
+          ev.add_inplace(acc[p], locals[t][p]);
     }
 
     return acc;

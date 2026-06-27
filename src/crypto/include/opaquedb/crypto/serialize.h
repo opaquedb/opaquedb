@@ -21,9 +21,17 @@ namespace opaquedb::crypto {
 
 std::string SerializeCiphertexts(const std::vector<seal::Ciphertext> &ciphers);
 
+// Deserializes a length-framed ciphertext list, bounding the count and every
+// length against the buffer and loading each ciphertext against the node
+// context (which validates its parms_id). When require_top_level is true the
+// ciphertexts must be fresh encryptions at the top of the modulus chain: this
+// is the trust boundary for a client-supplied query operand. Server-produced
+// ciphertexts (shard partials, combined results) may have been mod-switched
+// down the chain during evaluation, so callers reading those pass false; load()
+// still binds each to the context, and the chain level is validated.
 absl::StatusOr<std::vector<seal::Ciphertext>>
 DeserializeCiphertexts(const CryptoContext &ctx, const std::string &bytes,
-                       std::uint32_t max_count);
+                       std::uint32_t max_count, bool require_top_level = true);
 
 } // namespace opaquedb::crypto
 
