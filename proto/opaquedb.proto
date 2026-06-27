@@ -22,6 +22,13 @@ service OpaqueDB {
   // and apply its SELECT projection. The schema is public template metadata, not
   // secret data.
   rpc DescribeTable(DescribeRequest) returns (DescribeReply);
+
+  // Returns rows of a table for a SELECT with no WHERE clause (a full scan).
+  // This is a plaintext read: with no matched value there is no secret to hide,
+  // so the encrypted matcher is not used and the rows come back in the clear,
+  // matching how the payload is stored at rest. The client applies any DISTINCT,
+  // ORDER BY, and LIMIT/OFFSET over the returned rows.
+  rpc Scan(ScanRequest) returns (ScanReply);
 }
 
 // Which key a RegisterChunk carries a piece of.
@@ -104,4 +111,26 @@ message TableColumn {
 message DescribeReply {
   string table = 1;
   repeated TableColumn columns = 2;
+}
+
+message ScanRequest {
+  uint32 wire_version = 1;
+  string database = 2; // empty means "default"
+  string table = 3;
+  // The most rows the server should return. The client sets this to what it
+  // needs after its own ORDER BY / DISTINCT / LIMIT / OFFSET: just the
+  // OFFSET+LIMIT window when there is no client-side reordering, or a larger
+  // bound when ORDER BY / DISTINCT need the whole set. 0 means return no rows
+  // (a COUNT(*) with no WHERE needs only total_rows). The server also enforces
+  // its own hard cap so one request cannot stream an unbounded table.
+  uint64 max_rows = 4;
+}
+
+// Plaintext rows from a full scan. rows are payload records in storage order,
+// each decoded by the client against the table schema. total_rows is the true
+// row count of the table (before max_rows truncation), so a no-WHERE COUNT(*)
+// is exact without returning any row bytes.
+message ScanReply {
+  repeated bytes rows = 1;
+  uint64 total_rows = 2;
 }

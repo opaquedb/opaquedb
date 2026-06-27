@@ -309,6 +309,45 @@ grpc::Status QueryService::Insert(grpc::ServerContext *context,
   return grpc::Status::OK;
 }
 
+grpc::Status QueryService::Scan(grpc::ServerContext *context,
+                                const proto::ScanRequest *request,
+                                proto::ScanReply *reply) {
+  absl::StatusOr<auth::Principal> principal =
+      gate_->Check(ExtractAuthInputs(*context), auth::Role::kQuery);
+  if (!principal.ok()) {
+    return ToGrpcStatus(principal.status());
+  }
+  if (request->wire_version() != core::kWireVersion) {
+    return ToGrpcStatus(absl::FailedPreconditionError(absl::StrCat(
+        "wire version ", request->wire_version(), " not supported")));
+  }
+  // A full scan must read every shard. Fanning a plaintext scan out across the
+  // cluster is a tracked follow-up; until then, reject rather than silently
+  // return only this node's shard.
+  if (!peers_().empty()) {
+    return ToGrpcStatus(absl::UnimplementedError(
+        "full-table scan (SELECT with no WHERE) is not yet supported on a "
+        "sharded cluster; add a WHERE clause or query a single-node "
+        "deployment"));
+  }
+  const std::string db =
+      request->database().empty() ? "default" : request->database();
+  absl::StatusOr<Engine::ScanResult> result =
+      engine_->Scan(request->database(), request->table(), request->max_rows());
+  if (!result.ok()) {
+    spdlog::warn("scan of {}.{} failed: {}", db, request->table(),
+                 result.status().message());
+    return ToGrpcStatus(result.status());
+  }
+  spdlog::info("audit: scan principal={} {}.{} ({} of {} rows)", principal->id,
+               db, request->table(), result->rows.size(), result->total_rows);
+  reply->set_total_rows(result->total_rows);
+  for (std::vector<std::uint8_t> &row : result->rows) {
+    reply->add_rows(std::string(row.begin(), row.end()));
+  }
+  return grpc::Status::OK;
+}
+
 grpc::Status QueryService::DescribeTable(grpc::ServerContext *context,
                                          const proto::DescribeRequest *request,
                                          proto::DescribeReply *reply) {

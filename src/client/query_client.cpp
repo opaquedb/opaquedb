@@ -284,6 +284,42 @@ QueryClient::RunQuery(const std::string &client_id,
   return out;
 }
 
+namespace {
+
+// Collects the clean matched rows from decoded buckets and counts the dropped
+// same-key collisions. An absent bucket means no row matched there; a collided
+// bucket held more than one same-key row and is dropped (and counted).
+std::vector<std::vector<std::uint8_t>>
+CollectClean(std::vector<crypto::BucketResult> &buckets,
+             std::uint32_t *collided_out) {
+  std::vector<std::vector<std::uint8_t>> matched;
+  std::uint32_t collided = 0;
+  for (crypto::BucketResult &br : buckets) {
+    if (br.collided) {
+      ++collided;
+      continue;
+    }
+    if (br.present)
+      matched.push_back(std::move(br.record));
+  }
+  if (collided_out != nullptr)
+    *collided_out = collided;
+  return matched;
+}
+
+} // namespace
+
+absl::StatusOr<std::vector<std::vector<std::uint8_t>>> QueryClient::QueryClean(
+    const std::string &client_id, const std::string &sql_template,
+    std::uint64_t value, const std::string &backend_hint,
+    const std::string &database, std::uint32_t *collided_buckets) {
+  absl::StatusOr<Decoded> decoded =
+      RunQuery(client_id, sql_template, value, backend_hint, database);
+  if (!decoded.ok())
+    return decoded.status();
+  return CollectClean(decoded->buckets, collided_buckets);
+}
+
 absl::StatusOr<std::vector<std::vector<std::uint8_t>>>
 QueryClient::Query(const std::string &client_id,
                    const std::string &sql_template, std::uint64_t value,
@@ -294,29 +330,42 @@ QueryClient::Query(const std::string &client_id,
   if (!decoded.ok())
     return decoded.status();
 
-  std::vector<std::vector<std::uint8_t>> matched;
-  std::uint32_t collided = 0;
-  for (crypto::BucketResult &br : decoded->buckets) {
-    if (br.collided) {
-      ++collided; // two rows with the same key fell in one bucket
-      continue;
-    }
-    // An absent bucket means no row matched there; only present, clean buckets
-    // are matched rows.
-    if (br.present)
-      matched.push_back(std::move(br.record));
-  }
-  if (collided_buckets != nullptr)
-    *collided_buckets = collided;
+  std::vector<std::vector<std::uint8_t>> matched =
+      CollectClean(decoded->buckets, collided_buckets);
 
   // Apply the public row window: skip `offset` rows, take up to `limit`. LIMIT
-  // counts rows, not bucket slots; default is LIMIT 1, OFFSET 0.
+  // counts rows, not bucket slots; default is kDefaultSelectLimit, OFFSET 0.
   const std::uint64_t offset = decoded->prepared.offset.value_or(0);
-  const std::uint64_t limit = decoded->prepared.limit.value_or(1);
+  const std::uint64_t limit =
+      decoded->prepared.limit.value_or(sql::kDefaultSelectLimit);
   std::vector<std::vector<std::uint8_t>> out;
   for (std::uint64_t i = offset; i < matched.size() && out.size() < limit;
        ++i) {
     out.push_back(std::move(matched[i]));
+  }
+  return out;
+}
+
+absl::StatusOr<QueryClient::ScanResult>
+QueryClient::Scan(const std::string &database, const std::string &table,
+                  std::uint64_t max_rows) {
+  opaquedb::proto::ScanRequest req;
+  req.set_wire_version(core::kWireVersion);
+  req.set_database(database);
+  req.set_table(table);
+  req.set_max_rows(max_rows);
+
+  grpc::ClientContext ctx;
+  Authorize(ctx);
+  opaquedb::proto::ScanReply reply;
+  if (grpc::Status s = stub_->Scan(&ctx, req, &reply); !s.ok()) {
+    return FromGrpc(s);
+  }
+  ScanResult out;
+  out.total_rows = reply.total_rows();
+  out.rows.reserve(static_cast<std::size_t>(reply.rows_size()));
+  for (const std::string &row : reply.rows()) {
+    out.rows.emplace_back(row.begin(), row.end());
   }
   return out;
 }

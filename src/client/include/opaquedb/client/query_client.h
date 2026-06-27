@@ -58,6 +58,30 @@ public:
         const std::string &database = "default",
         std::uint32_t *collided_buckets = nullptr);
 
+  // Every clean matched row, with no LIMIT/OFFSET window applied. The caller
+  // applies DISTINCT, ORDER BY, and the row window itself (the CLI does this
+  // over decoded rows). Same value / literal handling as Query.
+  // collided_buckets receives the dropped same-key collision count as in Query.
+  absl::StatusOr<std::vector<std::vector<std::uint8_t>>>
+  QueryClean(const std::string &client_id, const std::string &sql_template,
+             std::uint64_t value, const std::string &backend_hint = "",
+             const std::string &database = "default",
+             std::uint32_t *collided_buckets = nullptr);
+
+  // The rows of a table for a SELECT with no WHERE (a full scan). rows are
+  // plaintext payload records the caller decodes with the schema; total_rows is
+  // the table's true row count (for a no-WHERE COUNT(*)). max_rows bounds how
+  // many rows the server returns (0 returns none, just the count). Plaintext by
+  // design: a no-WHERE query matches no secret value, so there is nothing to
+  // hide. database empty means "default".
+  struct ScanResult {
+    std::vector<std::vector<std::uint8_t>> rows;
+    std::uint64_t total_rows = 0;
+  };
+  absl::StatusOr<ScanResult> Scan(const std::string &database,
+                                  const std::string &table,
+                                  std::uint64_t max_rows);
+
   // Execute a private SELECT COUNT(*) query and return the number of matching
   // rows. The match count comes from the encrypted presence ciphertext summed
   // across every result bucket, so it is exact even when rows collide in a

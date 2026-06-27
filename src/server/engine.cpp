@@ -1,5 +1,6 @@
 #include "opaquedb/server/engine.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <optional>
 #include <span>
@@ -179,6 +180,37 @@ Engine::InsertRow(const std::string &database, const std::string &table,
   if (!result.ok())
     return result.status();
   return InsertOutcome{result->epoch_version, result->row_count};
+}
+
+absl::StatusOr<Engine::ScanResult> Engine::Scan(const std::string &database,
+                                                const std::string &table,
+                                                std::uint64_t max_rows) {
+  if (table.empty()) {
+    return absl::InvalidArgumentError("scan: table is required");
+  }
+  core::TableId id{
+      database.empty() ? std::string(core::kDefaultDatabase) : database, table};
+  absl::StatusOr<storage::EpochRepository *> repo = resolve_repo_(id);
+  if (!repo.ok())
+    return repo.status();
+  absl::StatusOr<std::unique_ptr<storage::EpochReader>> reader =
+      (*repo)->OpenCurrent();
+  if (!reader.ok())
+    return reader.status();
+
+  ScanResult result;
+  result.total_rows = (*reader)->row_count();
+  const std::uint64_t want = std::min(max_rows, kScanRowCap);
+  const std::uint64_t take = std::min(want, result.total_rows);
+  result.rows.reserve(take);
+  for (std::uint64_t r = 0; r < take; ++r) {
+    absl::StatusOr<std::span<const std::uint8_t>> bytes =
+        (*reader)->PayloadRecord(r);
+    if (!bytes.ok())
+      return bytes.status();
+    result.rows.emplace_back(bytes->begin(), bytes->end());
+  }
+  return result;
 }
 
 absl::StatusOr<Engine::ShardResult> Engine::EvaluateShard(
