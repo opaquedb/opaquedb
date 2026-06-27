@@ -250,15 +250,23 @@ client-side), not a local patch.
 `WHERE col IN (...)` and a flat same-column `OR` (`col=a OR col=b`) are supported
 as a multi-operand union on one column (see the matcher note); `OR` across
 different columns and conjunctive `col1=a AND col2=b` are not yet supported (the
-planner rejects cross-column OR and AND).
+planner rejects cross-column OR and AND). `<>`/`!=` is supported on a searchable
+column: the matcher flips the equality indicator (see the crypto note), so it
+costs exactly what `=` costs. Ordered comparisons (`<`, `>`, `BETWEEN`) and
+`LIKE` parse but the plan builder still rejects them. A `SELECT` with no `WHERE`
+is a full scan (see the scan note below), not run through `BuildLogicalPlan`.
 
 **Query path and CLI.** WHERE takes a bound param (`:name`) or an inline literal
 (`= "London"`). A literal is the secret value, so it is client-side sugar:
 `sql::PrepareClientQuery` (in `client::QueryClient`) lifts it out, encrypts it,
 and rewrites to `:v`; the server's `BuildLogicalPlan` rejects any literal, so the
-operator only ever sees the parameterized template. `LIMIT n` and `OFFSET m` are
-optional, public, and parsed into the plan (default `LIMIT 1`, no offset). There
-is one wire client,
+operator only ever sees the parameterized template. `LIMIT n`, `OFFSET m`,
+`ORDER BY col [ASC|DESC]`, `DISTINCT`, and column aliases (`col AS name`) are
+optional, public, and applied CLIENT-SIDE over the decoded rows, not pushed into
+the encrypted scan; the default LIMIT is `sql::kDefaultSelectLimit` (10, was 1),
+still bounded by `crypto.result_buckets`. So ORDER BY / DISTINCT sort and dedup
+only the rows that came back (at most `result_buckets` for a match query), not
+the whole table. There is one wire client,
 `client::QueryClient::Query(client_id, sql, value, backend_hint, database,
 collided_out)` (table from SQL, db default "default"); the `query` and `repl`
 commands and both examples use it (the old `server::DevClient` was deleted). For
@@ -266,12 +274,26 @@ commands and both examples use it (the old `server::DevClient` was deleted). For
 and encrypts one operand per value via `crypto::BuildEncryptedOperands`.
 `SELECT COUNT(*)` goes through `QueryClient::QueryCount`, which sums the
 per-bucket presence counts (exact even under bucket collisions) and the CLI
-renders the single number. All CLI parsing is
-CLI11; command files live under `src/cli/commands/`; shared helpers (`LoadConfig`
-for config+logging, `ReadFile`, the row renderers `RenderRaw`/`RenderWithSchema`)
-live in `src/cli/util.{h,cpp}`. `repl` registers keys once then runs each SELECT
-privately; line editing and tab-completion are via replxx; meta-commands `\use
-<db>`, `\tables`, `\help`, `\quit`. `query`/`repl` no longer take a `--schema`
+renders the single number. A `SELECT` with no `WHERE` is a plaintext full scan:
+`QueryClient::Scan(db, table, max_rows) -> Engine::Scan` reads `payload.seg`
+rows directly (no FHE, since a no-value query hides nothing) and returns up to
+`min(max_rows, Engine::kScanRowCap=10000)` rows plus the true `total_rows` (so a
+no-WHERE `COUNT(*)` is exact without returning rows). The Scan RPC is single-node:
+`QueryService::Scan` rejects a scan with an `UnimplementedError` when the node has
+shard peers (a sharded scan must fan out, a tracked follow-up). All CLI parsing is
+CLI11; command files live under `src/cli/commands/`; shared helpers live in
+`src/cli/util.{h,cpp}`: `LoadConfig`, `ReadFile`, `RenderRaw`/`RenderWithSchema`,
+`RenderTable` (aligned table), `BuildResultTable` (decode + project/alias +
+DISTINCT + ORDER BY + window, the testable pure pipeline), and `RunSelect` (the
+one orchestrator both `query` and `repl` use: parse, route to Scan/QueryCount/
+QueryClean, then render). `QueryClient::QueryClean` returns every clean matched
+row with no window so `RunSelect` can order/dedup/window over decoded rows;
+`QueryClient::Query` still applies the window for direct API/test callers. `repl`
+registers keys once then runs each statement; replxx gives line editing,
+persistent history (`$OPAQUEDB_HISTORY` or `~/.opaquedb_history`), and tab
+completion of keywords plus cached table/column names; statements span lines and
+end with `;`; meta-commands `\use <db>`, `\tables`, `\d <table>`, `\timing`,
+`\help`, `\quit`. `query`/`repl` no longer take a `--schema`
 file: the client fetches the table schema from the node via the `DescribeTable`
 RPC (public, Query role) and decodes rows from it (caching per `db.table` in the
 repl), falling back to `RenderRaw` hex if the fetch fails; only `load` still
@@ -289,7 +311,14 @@ XNOR), an AND across each record's bits by a rotate-and-multiply tree of depth
 empty padding blocks, which hold key 0 and would otherwise match a query for 0),
 a doubling masked-broadcast (no plaintext multiply, so no noise spent and no
 cross-block bleed), then per payload plane a `multiply_plain` by the packed
-payload and a per-bucket block-sum. The two slot rows are not merged with
+payload and a per-bucket block-sum. `<>` (`Op::kNe`) reuses this whole pipeline:
+right after the occupancy mask (when `sel` holds `eq` at occupied starts, 0
+elsewhere) it computes `ne = start_mask - eq` (`negate` then `add_plain` the
+mask), which is `1 - eq` at occupied starts and 0 elsewhere. That is plaintext
+arithmetic on an already-final ciphertext, so `<>` adds NO multiplicative depth
+and costs exactly what `=` costs. A `<>` usually matches many rows, so they
+spread across buckets by `Mix(key)` and collide like any multi-row result (the
+presence count stays exact; row retrieval drops collided buckets). The two slot rows are not merged with
 rotate_columns; the matched payload lands in a bucket of one row and the client
 sums the two rows' bucket. Only `1 + log2(key_bits)` ct*ct multiplies per batch
 (depth 5 at key_bits 16), independent of batch size. `EncryptedQuery` carries a
