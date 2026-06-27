@@ -142,6 +142,8 @@ constexpr std::string_view kKeys[] = {
     "cluster.etcd_client_cert",
     "cluster.etcd_client_key",
     "cluster.etcd_tls_name",
+    "cluster.listen",
+    "cluster.advertise",
     "cluster.tls_cert",
     "cluster.tls_key",
     "cluster.ca_cert",
@@ -151,6 +153,13 @@ constexpr std::string_view kKeys[] = {
     "server.max_message_bytes",
     "server.tls_cert",
     "server.tls_key",
+    "server.rate_limit_per_second",
+    "server.rate_limit_burst",
+    "client.ca_cert",
+    "client.tls_cert",
+    "client.tls_key",
+    "client.server_name",
+    "client.allow_insecure",
     "crypto.poly_modulus_degree",
     "crypto.plain_modulus_bits",
     "crypto.coeff_modulus_bits",
@@ -162,6 +171,7 @@ constexpr std::string_view kKeys[] = {
     "auth.enable_insecure",
     "auth.token_file",
     "auth.ca_cert",
+    "auth.admin_identities",
     "blobstore.kind",
     "blobstore.path",
     "metrics.listen",
@@ -258,6 +268,10 @@ absl::Status ApplyKeyValue(Config &config, std::string_view key,
     config.cluster.etcd_client_key = std::string(value);
   } else if (key == "cluster.etcd_tls_name") {
     config.cluster.etcd_tls_name = std::string(value);
+  } else if (key == "cluster.listen") {
+    config.cluster.listen = std::string(value);
+  } else if (key == "cluster.advertise") {
+    config.cluster.advertise = std::string(value);
   } else if (key == "cluster.tls_cert") {
     config.cluster.tls_cert = std::string(value);
   } else if (key == "cluster.tls_key") {
@@ -282,6 +296,29 @@ absl::Status ApplyKeyValue(Config &config, std::string_view key,
     config.server.tls_cert = std::string(value);
   } else if (key == "server.tls_key") {
     config.server.tls_key = std::string(value);
+  } else if (key == "server.rate_limit_per_second") {
+    auto v = ParseU32(key, value);
+    if (!v.ok())
+      return v.status();
+    config.server.rate_limit_per_second = *v;
+  } else if (key == "server.rate_limit_burst") {
+    auto v = ParseU32(key, value);
+    if (!v.ok())
+      return v.status();
+    config.server.rate_limit_burst = *v;
+  } else if (key == "client.ca_cert") {
+    config.client.ca_cert = std::string(value);
+  } else if (key == "client.tls_cert") {
+    config.client.tls_cert = std::string(value);
+  } else if (key == "client.tls_key") {
+    config.client.tls_key = std::string(value);
+  } else if (key == "client.server_name") {
+    config.client.server_name = std::string(value);
+  } else if (key == "client.allow_insecure") {
+    auto v = ParseBool(key, value);
+    if (!v.ok())
+      return v.status();
+    config.client.allow_insecure = *v;
   } else if (key == "crypto.poly_modulus_degree") {
     auto v = ParseU32(key, value);
     if (!v.ok())
@@ -328,6 +365,8 @@ absl::Status ApplyKeyValue(Config &config, std::string_view key,
     config.auth.token_file = std::string(value);
   } else if (key == "auth.ca_cert") {
     config.auth.ca_cert = std::string(value);
+  } else if (key == "auth.admin_identities") {
+    config.auth.admin_identities = ParseStringList(value);
   } else if (key == "blobstore.kind") {
     auto v = ParseBlobKind(value);
     if (!v.ok())
@@ -418,6 +457,25 @@ absl::Status Validate(const Config &config) {
   if (config.server.max_message_bytes == 0) {
     return absl::InvalidArgumentError(
         "server.max_message_bytes must be positive");
+  }
+  if (config.server.rate_limit_per_second == 0 ||
+      config.server.rate_limit_burst == 0) {
+    return absl::InvalidArgumentError(
+        "server.rate_limit_per_second and server.rate_limit_burst must be "
+        "positive");
+  }
+  // A client certificate is a key pair: one without the other cannot complete a
+  // handshake, so reject the half-configured case early.
+  if (config.client.tls_cert.empty() != config.client.tls_key.empty()) {
+    return absl::InvalidArgumentError(
+        "client.tls_cert and client.tls_key must be set together");
+  }
+  // A client certificate is only usable when the client also has a CA to verify
+  // the server; mutual TLS needs both directions.
+  if (!config.client.tls_cert.empty() && config.client.ca_cert.empty()) {
+    return absl::InvalidArgumentError(
+        "client mTLS (client.tls_cert) requires client.ca_cert to verify the "
+        "server");
   }
   // A clustered node exchanges client ciphertexts and keys with peers over the
   // Internal RPC. Refuse to do that in the clear: require cluster mTLS (its own
@@ -524,6 +582,10 @@ std::string ToToml(const Config &config) {
   for (int bits : config.crypto.coeff_modulus_bits) {
     coeff.push_back(static_cast<std::int64_t>(bits));
   }
+  toml::array admin_identities;
+  for (const std::string &id : config.auth.admin_identities) {
+    admin_identities.push_back(id);
+  }
 
   toml::table root;
   root.insert("node", toml::table{{"id", config.node.id},
@@ -538,18 +600,31 @@ std::string ToToml(const Config &config) {
                           {"etcd_client_cert", config.cluster.etcd_client_cert},
                           {"etcd_client_key", config.cluster.etcd_client_key},
                           {"etcd_tls_name", config.cluster.etcd_tls_name},
+                          {"listen", config.cluster.listen},
+                          {"advertise", config.cluster.advertise},
                           {"tls_cert", config.cluster.tls_cert},
                           {"tls_key", config.cluster.tls_key},
                           {"ca_cert", config.cluster.ca_cert},
                           {"allow_insecure", config.cluster.allow_insecure}});
   root.insert(
       "server",
-      toml::table{{"listen", config.server.listen},
-                  {"advertise", config.server.advertise},
-                  {"max_message_bytes",
-                   static_cast<std::int64_t>(config.server.max_message_bytes)},
-                  {"tls_cert", config.server.tls_cert},
-                  {"tls_key", config.server.tls_key}});
+      toml::table{
+          {"listen", config.server.listen},
+          {"advertise", config.server.advertise},
+          {"max_message_bytes",
+           static_cast<std::int64_t>(config.server.max_message_bytes)},
+          {"tls_cert", config.server.tls_cert},
+          {"tls_key", config.server.tls_key},
+          {"rate_limit_per_second",
+           static_cast<std::int64_t>(config.server.rate_limit_per_second)},
+          {"rate_limit_burst",
+           static_cast<std::int64_t>(config.server.rate_limit_burst)}});
+  root.insert("client",
+              toml::table{{"ca_cert", config.client.ca_cert},
+                          {"tls_cert", config.client.tls_cert},
+                          {"tls_key", config.client.tls_key},
+                          {"server_name", config.client.server_name},
+                          {"allow_insecure", config.client.allow_insecure}});
   root.insert(
       "crypto",
       toml::table{
@@ -569,7 +644,8 @@ std::string ToToml(const Config &config) {
               toml::table{{"mode", ToString(config.auth.mode)},
                           {"enable_insecure", config.auth.enable_insecure},
                           {"token_file", config.auth.token_file},
-                          {"ca_cert", config.auth.ca_cert}});
+                          {"ca_cert", config.auth.ca_cert},
+                          {"admin_identities", std::move(admin_identities)}});
   root.insert("blobstore",
               toml::table{{"kind", ToString(config.blobstore.kind)},
                           {"path", config.blobstore.path}});

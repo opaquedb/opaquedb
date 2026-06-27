@@ -27,10 +27,19 @@ etcd_ca_cert = ""                    # CA that signs the etcd server certificate
 etcd_client_cert = ""                # client certificate for mutual TLS to etcd
 etcd_client_key = ""                 # client private key for mutual TLS to etcd
 etcd_tls_name = ""                   # certificate host name override (TLS by IP)
+# The node-to-node (Internal) RPC runs on its own listener, isolated from the
+# client-facing one (the Elasticsearch transport-port model). Empty shares the
+# client listener (single-node and test setups); a cluster binds this to a
+# private interface. advertise is the address peers dial (set it for a wildcard
+# bind).
+listen = ""                          # node-to-node bind address; empty shares server.listen
+advertise = ""                       # address peers dial for node-to-node RPC
 # Node-to-node (Internal RPC) mTLS, a separate trust domain from client auth.
-# A clustered node (enabled = true) must set these (or server TLS) or it refuses
-# to start; allow_insecure permits unencrypted node-to-node traffic for local
-# development only.
+# The Internal listener requires and verifies a peer certificate, so only a node
+# holding a cluster-CA-signed certificate can reach it. A clustered node
+# (enabled = true) must set these (or server TLS) or it refuses to start;
+# allow_insecure permits unencrypted node-to-node traffic for local development
+# only.
 tls_cert = ""                        # this node's cluster certificate
 tls_key = ""                         # this node's cluster private key
 ca_cert = ""                         # CA that signs peer cluster certificates
@@ -42,6 +51,22 @@ advertise = ""                       # address peers use; required for clusterin
 max_message_bytes = 67108864         # large enough for evaluation key streams
 tls_cert = ""                        # required when auth.mode = mtls
 tls_key = ""
+rate_limit_per_second = 2000         # per-principal token-bucket refill rate
+rate_limit_burst = 2000              # per-principal token-bucket capacity
+
+[client]
+# How the CLI and application clients connect. A node ignores this section. TLS
+# is used when ca_cert is set (the client then verifies the server certificate);
+# tls_cert/tls_key add a client certificate for mutual TLS (required against an
+# auth.mode = mtls server). server_name overrides the certificate host name when
+# dialing by IP or loopback. The client fails closed: with no TLS material and
+# allow_insecure = false it refuses to connect. Set allow_insecure for local
+# development only.
+ca_cert = ""                         # CA that signs the server certificate
+tls_cert = ""                        # client certificate for mutual TLS
+tls_key = ""                         # client private key for mutual TLS
+server_name = ""                     # certificate host name override
+allow_insecure = false               # true to allow a plaintext client channel
 
 [crypto]                             # single source of truth for FHE params
 # The matcher is bit-sliced equality over SIMD slots: the key is binary-expanded
@@ -67,6 +92,7 @@ mode = "token"                       # token | mtls | none
 enable_insecure = false              # must be true to allow mode = none
 token_file = "/etc/opaquedb/tokens"
 ca_cert = ""                         # client CA for mtls
+admin_identities = []                # mTLS cert identities granted the Admin role
 
 [blobstore]
 kind = "local"                       # local | s3
