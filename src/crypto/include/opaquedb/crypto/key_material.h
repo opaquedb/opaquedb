@@ -57,10 +57,19 @@ public:
 private:
   ClientKeyring() = default;
 
+  // Loads the materialized accessor copies back from the seeded bytes.
+  void Materialize(const seal::SEALContext &context);
+
   seal::SecretKey secret_key_;
   seal::PublicKey public_key_;
   seal::RelinKeys relin_keys_;
   seal::GaloisKeys galois_keys_;
+  // The seeded wire form of the public and evaluation keys, produced once at
+  // generation time. SerializePublic hands these out directly; the materialized
+  // copies above are loaded back from them for the local accessors.
+  std::string public_key_bytes_;
+  std::string relin_keys_bytes_;
+  std::string galois_keys_bytes_;
   bool has_galois_ = false;
 };
 
