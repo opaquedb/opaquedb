@@ -177,7 +177,7 @@ struct AuthConfig {
 
 // Where the persistent keyring lives. Keys are stored as local files, one per
 // client id (see admin::FileKeyringStore).
-struct BlobStoreConfig {
+struct KeyringConfig {
   // Empty means data_dir/keys, so the keys sit beside the epochs on the same
   // volume by default (see KeyringDir).
   std::string path;
@@ -203,7 +203,7 @@ struct Config {
   CryptoConfig crypto;
   StorageConfig storage;
   AuthConfig auth;
-  BlobStoreConfig blobstore;
+  KeyringConfig keyring;
   MetricsConfig metrics;
   LoggingConfig logging;
 

@@ -300,7 +300,7 @@ TEST_F(ConfigTest, DefaultConfigTomlMatchesCompiledDefaults) {
   EXPECT_EQ(f.crypto.key_bits, d.crypto.key_bits);
   EXPECT_EQ(f.storage.record_bytes, d.storage.record_bytes);
   EXPECT_EQ(f.auth.token_file, d.auth.token_file);
-  EXPECT_EQ(f.blobstore.path, d.blobstore.path);
+  EXPECT_EQ(f.keyring.path, d.keyring.path);
   EXPECT_EQ(f.metrics.listen, d.metrics.listen);
   EXPECT_EQ(f.logging.level, d.logging.level);
 }

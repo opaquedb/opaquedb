@@ -22,7 +22,7 @@
 namespace opaquedb::crypto {
 
 // The serialized public and evaluation keys, as they travel over the Register
-// RPC and rest in the BlobStore. Opaque bytes to every layer above crypto.
+// RPC and rest in the keyring store. Opaque bytes to every layer above crypto.
 struct KeyMaterial {
   std::string public_key;
   std::string relin_keys;

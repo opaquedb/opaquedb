@@ -144,8 +144,8 @@ TEST_F(DistributedQuery, FansOutAndCombinesAcrossShards) {
   ASSERT_TRUE((*node_a)->WaitForReady().ok());
   ASSERT_TRUE((*node_b)->WaitForReady().ok());
 
-  // One client keypair, registered on both nodes (the BlobStore distributes
-  // keys in production; here we register directly).
+  // One client keypair, registered on both nodes (the coordinator forwards
+  // keys to peers in production; here we register directly).
   auto ctx = CryptoContext::Create(cfg_a_.crypto);
   ASSERT_TRUE(ctx.ok());
   ClientKeyring keys = ClientKeyring::Generate(*ctx);

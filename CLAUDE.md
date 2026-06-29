@@ -396,7 +396,7 @@ roughly halves these sizes on the wire; the local accessors load the seeded
 bytes back. Key distribution is the coordinator's job: `Register` stores the
 keys locally and forwards them to every peer. Each node persists its keys with
 `admin::FileKeyringStore`: one file per client id under `Config::KeyringDir()`
-(`blobstore.path`, default `<data_dir>/keys`), atomic temp-then-rename, mode
+(`keyring.path`, default `<data_dir>/keys`), atomic temp-then-rename, mode
 0600; re-register overwrites, so one client id maps to exactly one keyset. The
 store is read-through cached, so a restart reloads keys from disk and a client
 need not re-register. A client can also persist its OWN keyset (secret key included) with

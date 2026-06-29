@@ -23,8 +23,8 @@ std::string Config::DatabasesDir() const {
 }
 
 std::string Config::KeyringDir() const {
-  if (!blobstore.path.empty()) {
-    return blobstore.path;
+  if (!keyring.path.empty()) {
+    return keyring.path;
   }
   return node.data_dir + "/keys";
 }

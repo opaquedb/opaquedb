@@ -94,7 +94,7 @@ token_file = "/etc/opaquedb/tokens"
 ca_cert = ""                         # client CA for mtls
 admin_identities = []                # mTLS cert identities granted the Admin role
 
-[blobstore]
+[keyring]
 path = ""                            # persistent keyring dir; empty = <data_dir>/keys
 
 [metrics]

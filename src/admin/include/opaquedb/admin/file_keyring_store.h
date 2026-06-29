@@ -12,7 +12,7 @@
 #include "opaquedb/crypto/key_material.h"
 
 // A keyring store that persists each client's public and evaluation keys to
-// disk, one file per client id, under a directory (config.blobstore.path). The
+// disk, one file per client id, under a directory (config.keyring.path). The
 // in-memory store loses every registration on restart, which forces clients to
 // re-register their ~110 MB Galois set on every node bounce. This store keeps
 // them across restarts, so a client registers once and the keys are read back
