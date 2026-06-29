@@ -41,16 +41,6 @@ std::string ToString(AuthMode mode) {
   return "token";
 }
 
-std::string ToString(BlobStoreKind kind) {
-  switch (kind) {
-  case BlobStoreKind::kLocal:
-    return "local";
-  case BlobStoreKind::kS3:
-    return "s3";
-  }
-  return "local";
-}
-
 std::string ToString(LogFormat format) {
   switch (format) {
   case LogFormat::kJson:

@@ -187,22 +187,14 @@ absl::Status NodeServer::Start() {
 
   // The keyring persists each client's public and evaluation keys so a client
   // registers once and the keys survive a node restart, instead of being held
-  // only in memory. The blobstore config selects where they live.
-  switch (config_.blobstore.kind) {
-  case config::BlobStoreKind::kLocal: {
-    const std::string keyring_dir = config_.KeyringDir();
-    absl::StatusOr<std::unique_ptr<admin::FileKeyringStore>> store =
-        admin::FileKeyringStore::Open(keyring_dir);
-    if (!store.ok())
-      return store.status();
-    keyring_ = *std::move(store);
-    spdlog::info("keyring persisted to {}", keyring_dir);
-    break;
-  }
-  case config::BlobStoreKind::kS3:
-    return absl::UnimplementedError(
-        "blobstore.kind=s3 is not implemented; use local");
-  }
+  // only in memory.
+  const std::string keyring_dir = config_.KeyringDir();
+  absl::StatusOr<std::unique_ptr<admin::FileKeyringStore>> store =
+      admin::FileKeyringStore::Open(keyring_dir);
+  if (!store.ok())
+    return store.status();
+  keyring_ = *std::move(store);
+  spdlog::info("keyring persisted to {}", keyring_dir);
 
   // The engine routes each query to the repository that holds its table, across
   // many databases and tables. The manager opens per-table repositories on

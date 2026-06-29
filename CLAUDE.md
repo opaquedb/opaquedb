@@ -395,12 +395,11 @@ full set for benches). The reduced Galois set is ~125 MB at poly 16384 (relin
 roughly halves these sizes on the wire; the local accessors load the seeded
 bytes back. Key distribution is the coordinator's job: `Register` stores the
 keys locally and forwards them to every peer. Each node persists its keys with
-`admin::FileKeyringStore` (the keyring backend chosen by `BlobStoreConfig`;
-`kLocal` writes one file per client id under `Config::KeyringDir()`, default
-`<data_dir>/keys`, atomic temp-then-rename, mode 0600; re-register overwrites, so
-one client id maps to exactly one keyset; `kS3` is not implemented). The store is
-read-through cached, so a restart reloads keys from disk and a client need not
-re-register. A client can also persist its OWN keyset (secret key included) with
+`admin::FileKeyringStore`: one file per client id under `Config::KeyringDir()`
+(`blobstore.path`, default `<data_dir>/keys`), atomic temp-then-rename, mode
+0600; re-register overwrites, so one client id maps to exactly one keyset. The
+store is read-through cached, so a restart reloads keys from disk and a client
+need not re-register. A client can also persist its OWN keyset (secret key included) with
 `crypto::ClientKeyring::SerializeAll` / `QueryClient::SerializeKeyset` and rebuild
 via `QueryClient::CreateWithKeyset` to reuse its identity across runs without a
 second `Register`; that blob is the secret and never crosses the wire (the wire
