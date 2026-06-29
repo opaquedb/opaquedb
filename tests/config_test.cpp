@@ -159,6 +159,29 @@ TEST_F(ConfigTest, AcceptsPowerOfTwoKeyBits) {
   EXPECT_EQ(cfg->crypto.key_bits, 32u);
 }
 
+TEST_F(ConfigTest, RejectsKeyBitsTooDeepForModulusChain) {
+  // key_bits = 64 is a power of two <= 64 and fits the slot geometry, but its
+  // matcher depth (1 + log2(64) = 7) exceeds the default 6-prime modulus chain,
+  // which used to be accepted and silently decrypt every query to garbage.
+  LoadOptions opts;
+  opts.env = FakeEnv({{"OPAQUEDB_CRYPTO_KEY_BITS", "64"}});
+  auto cfg = Load(opts);
+  ASSERT_FALSE(cfg.ok());
+  EXPECT_EQ(cfg.status().code(), absl::StatusCode::kInvalidArgument);
+}
+
+TEST_F(ConfigTest, AcceptsKeyBits64WhenChainIsDeepEnough) {
+  // The same key_bits = 64 is fine once the chain lists enough primes for the
+  // depth-7 matcher (the guard is about chain depth, not a hard key_bits cap).
+  LoadOptions opts;
+  opts.env =
+      FakeEnv({{"OPAQUEDB_CRYPTO_KEY_BITS", "64"},
+               {"OPAQUEDB_CRYPTO_COEFF_MODULUS_BITS", "60,60,60,60,60,60,49"}});
+  auto cfg = Load(opts);
+  ASSERT_TRUE(cfg.ok()) << cfg.status().message();
+  EXPECT_EQ(cfg->crypto.key_bits, 64u);
+}
+
 TEST_F(ConfigTest, ClusterEnabledRequiresMtlsOrOptIn) {
   // A clustered node with no cluster/server TLS fails closed.
   LoadOptions deny;
