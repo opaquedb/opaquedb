@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -11,6 +12,7 @@
 
 #include "admin.grpc.pb.h"
 #include "grpcpp/grpcpp.h"
+#include "opaquedb.grpc.pb.h"
 #include "opaquedb/admin/keyring_store.h"
 #include "opaquedb/client/query_client.h"
 #include "opaquedb/config/config.h"
@@ -560,6 +562,214 @@ TEST_F(ServerEndToEnd, AdminApiEnforcesAdminRoleOverGrpc) {
   EXPECT_EQ(status_with("a-token"), grpc::StatusCode::OK);
   EXPECT_EQ(status_with("q-token"), grpc::StatusCode::PERMISSION_DENIED);
   EXPECT_EQ(status_with(""), grpc::StatusCode::UNAUTHENTICATED);
+
+  (*node)->Shutdown();
+}
+
+// With auth disabled, every caller is the anonymous principal with the Query
+// role. That is enough to register keys and run a query, but it must NOT reach
+// any Admin RPC: open mode is "no authentication", not "everyone is admin".
+TEST_F(ServerEndToEnd, NoAuthHasQueryRoleButCannotAdminister) {
+  // The fixture already runs auth.mode=none.
+  LoadTable(8);
+  auto node = NodeServer::Create(cfg_);
+  ASSERT_TRUE(node.ok());
+  ASSERT_TRUE((*node)->Start().ok());
+  ASSERT_TRUE((*node)->WaitForReady().ok());
+
+  // Query role works: register and run a private query with no token.
+  auto client = QueryClient::Create(cfg_, (*node)->listen_address());
+  ASSERT_TRUE(client.ok()) << client.status().message();
+  ASSERT_TRUE((*client)->Register("c1").ok());
+  auto rows = (*client)->Query("c1", "SELECT v FROM t WHERE k = :k", 2, "");
+  ASSERT_TRUE(rows.ok()) << rows.status().message();
+
+  auto channel = grpc::CreateChannel((*node)->listen_address(),
+                                     grpc::InsecureChannelCredentials());
+
+  // An Admin RPC is refused even with auth off: the anonymous principal has the
+  // Query role, not Admin.
+  auto admin_stub = opaquedb::proto::Admin::NewStub(channel);
+  grpc::ClientContext sctx;
+  opaquedb::proto::StatusRequest sreq;
+  sreq.set_wire_version(opaquedb::core::kWireVersion);
+  opaquedb::proto::StatusReply srep;
+  EXPECT_EQ(admin_stub->Status(&sctx, sreq, &srep).error_code(),
+            grpc::StatusCode::PERMISSION_DENIED);
+
+  // Insert mutates data and also requires Admin, so it is refused too.
+  auto query_stub = opaquedb::proto::OpaqueDB::NewStub(channel);
+  grpc::ClientContext ictx;
+  opaquedb::proto::InsertRequest ireq;
+  ireq.set_wire_version(opaquedb::core::kWireVersion);
+  ireq.set_table("t");
+  *ireq.add_values() = "9";
+  *ireq.add_values() = "nine";
+  opaquedb::proto::InsertReply irep;
+  EXPECT_EQ(query_stub->Insert(&ictx, ireq, &irep).error_code(),
+            grpc::StatusCode::PERMISSION_DENIED);
+
+  (*node)->Shutdown();
+}
+
+// Exhaustive role gate over every privileged RPC: in token mode an admin token
+// is admitted, a query token is forbidden, and no token is unauthenticated.
+// This is the "no-auth people cannot do anything" guarantee, asserted per RPC.
+TEST_F(ServerEndToEnd, EveryPrivilegedRpcEnforcesItsRole) {
+  const std::string token_file = (dir_ / "tokens").string();
+  {
+    std::ofstream out(token_file);
+    out << "alice query q-token\n";
+    out << "root admin a-token\n";
+  }
+  cfg_.auth.mode = opaquedb::config::AuthMode::kToken;
+  cfg_.auth.enable_insecure = false;
+  cfg_.auth.token_file = token_file;
+
+  LoadTable(8);
+  auto node = NodeServer::Create(cfg_);
+  ASSERT_TRUE(node.ok());
+  ASSERT_TRUE((*node)->Start().ok());
+  ASSERT_TRUE((*node)->WaitForReady().ok());
+
+  auto channel = grpc::CreateChannel((*node)->listen_address(),
+                                     grpc::InsecureChannelCredentials());
+  auto admin = opaquedb::proto::Admin::NewStub(channel);
+  auto query = opaquedb::proto::OpaqueDB::NewStub(channel);
+  const std::uint32_t wire = opaquedb::core::kWireVersion;
+
+  auto meta = [](grpc::ClientContext &ctx, const std::string &token) {
+    if (!token.empty())
+      ctx.AddMetadata("authorization", "Bearer " + token);
+  };
+
+  // One closure per privileged RPC, each returning the gRPC status code for a
+  // given bearer token. Payloads are minimal: the gate runs before the handler
+  // body, so the role decision does not depend on a fully valid request.
+  std::vector<std::pair<std::string,
+                        std::function<grpc::StatusCode(const std::string &)>>>
+      rpcs;
+  rpcs.emplace_back("Admin.Status", [&](const std::string &t) {
+    grpc::ClientContext c;
+    meta(c, t);
+    opaquedb::proto::StatusRequest req;
+    req.set_wire_version(wire);
+    opaquedb::proto::StatusReply rep;
+    return admin->Status(&c, req, &rep).error_code();
+  });
+  rpcs.emplace_back("Admin.InspectSchema", [&](const std::string &t) {
+    grpc::ClientContext c;
+    meta(c, t);
+    opaquedb::proto::SchemaRequest req;
+    req.set_wire_version(wire);
+    opaquedb::proto::SchemaReply rep;
+    return admin->InspectSchema(&c, req, &rep).error_code();
+  });
+  rpcs.emplace_back("Admin.ListEpochs", [&](const std::string &t) {
+    grpc::ClientContext c;
+    meta(c, t);
+    opaquedb::proto::ListEpochsRequest req;
+    req.set_wire_version(wire);
+    opaquedb::proto::ListEpochsReply rep;
+    return admin->ListEpochs(&c, req, &rep).error_code();
+  });
+  rpcs.emplace_back("Admin.RollbackEpoch", [&](const std::string &t) {
+    grpc::ClientContext c;
+    meta(c, t);
+    opaquedb::proto::RollbackRequest req;
+    req.set_wire_version(wire);
+    req.set_version(1);
+    opaquedb::proto::RollbackReply rep;
+    return admin->RollbackEpoch(&c, req, &rep).error_code();
+  });
+  rpcs.emplace_back("Admin.ListPrincipals", [&](const std::string &t) {
+    grpc::ClientContext c;
+    meta(c, t);
+    opaquedb::proto::PrincipalsRequest req;
+    req.set_wire_version(wire);
+    opaquedb::proto::PrincipalsReply rep;
+    return admin->ListPrincipals(&c, req, &rep).error_code();
+  });
+  rpcs.emplace_back("Admin.Load", [&](const std::string &t) {
+    grpc::ClientContext c;
+    meta(c, t);
+    opaquedb::proto::LoadReply rep;
+    auto writer = admin->Load(&c, &rep);
+    opaquedb::proto::LoadChunk chunk;
+    chunk.set_wire_version(wire);
+    writer->Write(chunk);
+    writer->WritesDone();
+    return writer->Finish().error_code();
+  });
+  rpcs.emplace_back("OpaqueDB.Insert", [&](const std::string &t) {
+    grpc::ClientContext c;
+    meta(c, t);
+    opaquedb::proto::InsertRequest req;
+    req.set_wire_version(wire);
+    req.set_table("t");
+    *req.add_values() = "9";
+    *req.add_values() = "nine";
+    opaquedb::proto::InsertReply rep;
+    return query->Insert(&c, req, &rep).error_code();
+  });
+
+  for (const auto &[name, call] : rpcs) {
+    EXPECT_EQ(call("q-token"), grpc::StatusCode::PERMISSION_DENIED)
+        << name << " must reject the query role";
+    EXPECT_EQ(call(""), grpc::StatusCode::UNAUTHENTICATED)
+        << name << " must reject a missing token";
+    const grpc::StatusCode admitted = call("a-token");
+    EXPECT_NE(admitted, grpc::StatusCode::PERMISSION_DENIED)
+        << name << " must admit the admin role";
+    EXPECT_NE(admitted, grpc::StatusCode::UNAUTHENTICATED)
+        << name << " must admit the admin role";
+  }
+
+  (*node)->Shutdown();
+}
+
+// Register once, then reuse the persisted keyset on a fresh node over the same
+// data directory without registering again. This is the whole point of the
+// file-backed keyring (server side) plus SerializeKeyset/CreateWithKeyset
+// (client side): keys survive a restart and the client keeps its identity.
+TEST_F(ServerEndToEnd, RegisterOnceSurvivesRestart) {
+  LoadTable(8);
+
+  std::string keyset;
+  {
+    auto node = NodeServer::Create(cfg_);
+    ASSERT_TRUE(node.ok());
+    ASSERT_TRUE((*node)->Start().ok());
+    ASSERT_TRUE((*node)->WaitForReady().ok());
+
+    auto client = QueryClient::Create(cfg_, (*node)->listen_address());
+    ASSERT_TRUE(client.ok()) << client.status().message();
+    ASSERT_TRUE((*client)->Register("c1").ok());
+    auto rows = (*client)->Query("c1", "SELECT v FROM t WHERE k = :k", 5, "");
+    ASSERT_TRUE(rows.ok()) << rows.status().message();
+    ASSERT_EQ(rows->size(), 1u);
+
+    auto saved = (*client)->SerializeKeyset();
+    ASSERT_TRUE(saved.ok()) << saved.status().message();
+    keyset = *saved;
+    (*node)->Shutdown();
+  }
+
+  // A brand new node over the same data_dir: the persisted keyring reloads c1's
+  // keys from disk, and the client rebuilt from the saved keyset queries with
+  // no second Register.
+  auto node = NodeServer::Create(cfg_);
+  ASSERT_TRUE(node.ok());
+  ASSERT_TRUE((*node)->Start().ok());
+  ASSERT_TRUE((*node)->WaitForReady().ok());
+
+  auto client =
+      QueryClient::CreateWithKeyset(cfg_, (*node)->listen_address(), keyset);
+  ASSERT_TRUE(client.ok()) << client.status().message();
+  auto rows = (*client)->Query("c1", "SELECT v FROM t WHERE k = :k", 5, "");
+  ASSERT_TRUE(rows.ok()) << rows.status().message();
+  ASSERT_EQ(rows->size(), 1u);
+  EXPECT_EQ(TextValue((*rows)[0]), "value-5");
 
   (*node)->Shutdown();
 }
