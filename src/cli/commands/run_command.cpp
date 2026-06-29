@@ -54,6 +54,15 @@ void RunCommand::Register(CLI::App &parent, const GlobalOptions &globals,
       return;
     }
     spdlog::info("listening on {}", (*node)->listen_address());
+    // Echo the security-relevant configuration so an operator can confirm the
+    // node came up the way they intended without re-deriving it from the file.
+    const char *auth_mode =
+        config->auth.mode == config::AuthMode::kToken  ? "token"
+        : config->auth.mode == config::AuthMode::kMtls ? "mtls"
+                                                       : "none";
+    spdlog::info("startup: auth={} cluster={} data_dir={}", auth_mode,
+                 config->cluster.enabled ? "enabled" : "disabled",
+                 config->node.data_dir);
 
     std::atomic<bool> stop{false};
     std::atomic<bool> reload{false};
