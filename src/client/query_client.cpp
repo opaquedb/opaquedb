@@ -181,7 +181,10 @@ absl::Status QueryClient::Register(const std::string &client_id) {
       ch.set_wire_version(core::kWireVersion);
       ch.set_client_id(client_id);
       ch.set_kind(k);
-      ch.set_data(d.substr(off, kChunkBytes));
+      // (ptr, len) copies the chunk into the message directly; substr would
+      // build a throwaway std::string per chunk of a ~125 MB Galois blob.
+      const std::size_t len = std::min(kChunkBytes, d.size() - off);
+      ch.set_data(d.data() + off, len);
       if (!w->Write(ch))
         return false;
     }
