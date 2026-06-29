@@ -91,6 +91,11 @@ add_opaquedb_test(admin_test admin_test.cpp)
 target_link_libraries(admin_test PRIVATE opaquedb_admin opaquedb_server
   opaquedb_config opaquedb_storage opaquedb_core)
 
+# The persistent file-backed keyring: one keyset per client id, surviving
+# restarts. Opaque bytes, no SEAL, so it stays in the fast tier.
+add_opaquedb_test(file_keyring_store_test file_keyring_store_test.cpp)
+target_link_libraries(file_keyring_store_test PRIVATE opaquedb_admin)
+
 add_opaquedb_test(cluster_test cluster_test.cpp)
 target_link_libraries(cluster_test PRIVATE opaquedb_cluster)
 

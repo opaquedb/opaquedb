@@ -20,13 +20,6 @@ namespace opaquedb::config {
 // enable_insecure is true; see Validate.
 enum class AuthMode { kToken, kMtls, kNone };
 
-// Where large evaluation key blobs are stored. Local is a directory now; s3 is
-// a documented extension point and is the intended production path for
-// distributing the large Galois key set: the coordinator writes a client's keys
-// to a shared object store (S3 or a MinIO deployment) once, and shards read
-// them by client id instead of having the keys re-streamed to every shard.
-enum class BlobStoreKind { kLocal, kS3 };
-
 // Log output format. JSON by default so journald and log shippers parse it.
 enum class LogFormat { kJson, kText };
 
@@ -182,9 +175,12 @@ struct AuthConfig {
   std::vector<std::string> admin_identities;
 };
 
-struct BlobStoreConfig {
-  BlobStoreKind kind = BlobStoreKind::kLocal;
-  std::string path = "/var/lib/opaquedb/keys";
+// Where the persistent keyring lives. Keys are stored as local files, one per
+// client id (see admin::FileKeyringStore).
+struct KeyringConfig {
+  // Empty means data_dir/keys, so the keys sit beside the epochs on the same
+  // volume by default (see KeyringDir).
+  std::string path;
 };
 
 struct MetricsConfig {
@@ -207,7 +203,7 @@ struct Config {
   CryptoConfig crypto;
   StorageConfig storage;
   AuthConfig auth;
-  BlobStoreConfig blobstore;
+  KeyringConfig keyring;
   MetricsConfig metrics;
   LoggingConfig logging;
 
@@ -226,12 +222,15 @@ struct Config {
   // The directory that holds the per-database subtrees, <base>/db. The catalog
   // scans this to enumerate databases and tables.
   std::string DatabasesDir() const;
+
+  // The persistent keyring directory, resolving the empty default to
+  // data_dir/keys so the keys live on the same volume as the epochs.
+  std::string KeyringDir() const;
 };
 
 // String conversions for the enums, used by parsing, printing, and error
 // messages. They are the single place the wire spelling of each enum lives.
 std::string ToString(AuthMode mode);
-std::string ToString(BlobStoreKind kind);
 std::string ToString(LogFormat format);
 
 } // namespace opaquedb::config

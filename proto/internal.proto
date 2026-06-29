@@ -13,8 +13,8 @@ service Internal {
   rpc Evaluate(ShardQuery) returns (ShardPartial);
   // The coordinating node forwards a client's keys to every shard so each can
   // evaluate. Streamed because the Galois key set is large (hundreds of MB);
-  // the shard concatenates chunks of the same kind. A BlobStore-backed keyring
-  // is the documented production path for distributing keys without re-sending.
+  // the shard concatenates chunks of the same kind and persists them, so a
+  // restart needs no re-send.
   rpc RegisterKeys(stream KeyUploadChunk) returns (KeyUploadReply);
 }
 

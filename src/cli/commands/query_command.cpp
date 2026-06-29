@@ -6,6 +6,7 @@
 #include "../util.h"
 #include "absl/strings/str_replace.h"
 #include "opaquedb/client/query_client.h"
+#include "opaquedb/sql/parser.h"
 #include "spdlog/spdlog.h"
 
 namespace opaquedb::cli {
@@ -28,9 +29,10 @@ void QueryCommand::Register(CLI::App &parent, const GlobalOptions &globals,
       ->add_option("sql", sql_,
                    "SQL template, e.g. SELECT city FROM weather WHERE id = :id")
       ->required();
-  query->add_option("--param", value_,
-                    "Integer WHERE value to encrypt (omit when the SQL has an "
-                    "inline literal)");
+  CLI::Option *param_opt =
+      query->add_option("--param", value_,
+                        "Integer WHERE value to encrypt (omit when the SQL has "
+                        "an inline literal)");
   query->add_option("--database", database_,
                     "Database holding the table (default \"default\")");
   query->add_option("--target", target_, "host:port (default: from config)");
@@ -38,10 +40,25 @@ void QueryCommand::Register(CLI::App &parent, const GlobalOptions &globals,
   query->add_option("--backend", backend_,
                     "Backend name (default: by capability)");
   query->add_option("--token", token_, "Bearer token for token auth mode");
-  query->callback([this, &globals, &exit_code]() {
+  query->callback([this, &globals, &exit_code, param_opt]() {
     absl::StatusOr<config::Config> config = LoadConfig(globals);
     if (!config.ok()) {
       spdlog::error("query: {}", config.status().message());
+      exit_code = 1;
+      return;
+    }
+
+    // A query with a bound parameter (:name) and no inline literal needs
+    // --param. Without this check the value would default to 0 and the query
+    // would silently run for 0, returning wrong results with no error. Inline
+    // literals (WHERE id = 42) carry their own value, so they need no --param.
+    if (absl::StatusOr<sql::PreparedQuery> prepared =
+            sql::PrepareClientQuery(sql_);
+        prepared.ok() && prepared->literals.empty() &&
+        prepared->sql_template.find(':') != std::string::npos &&
+        param_opt->count() == 0) {
+      spdlog::error("query: the SQL has a bound parameter but no --param was "
+                    "given; pass --param <int> or use an inline literal");
       exit_code = 1;
       return;
     }

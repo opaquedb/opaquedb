@@ -1,4 +1,5 @@
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <utility>
@@ -38,8 +39,8 @@ GlobalOptions::ToLoadOptions(bool file_optional) const {
 }
 
 int Run(int argc, char **argv) {
-  CLI::App app{"OpaqueDB: run SQL over encrypted data without revealing the "
-               "query."};
+  CLI::App app{"OpaqueDB: a post-quantum private database. Query data without "
+               "revealing the query; the operator never sees the value."};
   app.set_version_flag("--version", std::string{core::version()});
   app.require_subcommand(0);
 
@@ -81,6 +82,13 @@ int Run(int argc, char **argv) {
   enable_fallthrough(&app);
 
   CLI11_PARSE(app, argc, argv);
+
+  // With no subcommand there is nothing to do, so show help instead of exiting
+  // silently. This is the bare `opaquedb` invocation.
+  if (app.get_subcommands().empty()) {
+    std::cout << app.help();
+    return exit_code;
+  }
   return exit_code;
 }
 

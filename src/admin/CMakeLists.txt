@@ -4,7 +4,8 @@
 # nothing about transport. The server's gRPC admin adapter depends on it.
 add_library(opaquedb_admin
   service.cpp
-  keyring_store.cpp)
+  keyring_store.cpp
+  file_keyring_store.cpp)
 
 target_include_directories(opaquedb_admin PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)

@@ -1,13 +1,44 @@
 #include "opaquedb/crypto/key_material.h"
 
+#include <cstdint>
 #include <exception>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 #include "absl/strings/str_cat.h"
 
 namespace opaquedb::crypto {
 namespace {
+
+// Magic and version for the local full-keyset blob (SerializeAll/LoadAll). A
+// mismatch means the bytes are not ours or are from an incompatible layout.
+constexpr std::string_view kKeyringMagic = "OQCKR01";
+
+void AppendU64(std::string &out, std::uint64_t value) {
+  for (int i = 0; i < 8; ++i) {
+    out.push_back(static_cast<char>(value & 0xFF));
+    value >>= 8;
+  }
+}
+
+// Reads a length-prefixed blob, validating the declared length against the
+// bytes that actually remain, so a truncated or hostile blob cannot over-read.
+bool ReadBlob(std::string_view buf, std::size_t &offset, std::string &out) {
+  if (offset + 8 > buf.size())
+    return false;
+  std::uint64_t len = 0;
+  for (std::size_t i = 0; i < 8; ++i)
+    len |=
+        static_cast<std::uint64_t>(static_cast<unsigned char>(buf[offset + i]))
+        << (8 * i);
+  offset += 8;
+  if (len > buf.size() - offset)
+    return false;
+  out.assign(buf.data() + offset, len);
+  offset += len;
+  return true;
+}
 
 // Serializes a SEAL Serializable/saveable object to a string. For the
 // Serializable<T> wrappers returned by KeyGenerator::create_*, save() emits the
@@ -104,6 +135,75 @@ absl::StatusOr<KeyMaterial> ClientKeyring::SerializePublic() const {
   material.relin_keys = relin_keys_bytes_;
   material.galois_keys = has_galois_ ? galois_keys_bytes_ : "";
   return material;
+}
+
+absl::StatusOr<std::string> ClientKeyring::SerializeAll() const {
+  std::string secret_bytes;
+  try {
+    secret_bytes = SaveToString(secret_key_);
+  } catch (const std::exception &e) {
+    return absl::InternalError(
+        absl::StrCat("failed to serialize secret key: ", e.what()));
+  }
+  std::string out;
+  out.append(kKeyringMagic);
+  out.push_back(has_galois_ ? 1 : 0);
+  AppendU64(out, secret_bytes.size());
+  out.append(secret_bytes);
+  AppendU64(out, public_key_bytes_.size());
+  out.append(public_key_bytes_);
+  AppendU64(out, relin_keys_bytes_.size());
+  out.append(relin_keys_bytes_);
+  AppendU64(out, galois_keys_bytes_.size());
+  out.append(galois_keys_bytes_);
+  return out;
+}
+
+absl::StatusOr<ClientKeyring> ClientKeyring::LoadAll(const CryptoContext &ctx,
+                                                     std::string_view bytes) {
+  if (bytes.size() < kKeyringMagic.size() + 1 ||
+      bytes.substr(0, kKeyringMagic.size()) != kKeyringMagic)
+    return absl::InvalidArgumentError("keyset blob has a bad or missing magic");
+  std::size_t offset = kKeyringMagic.size();
+  const bool has_galois = bytes[offset++] != 0;
+
+  std::string secret_bytes;
+  ClientKeyring keyring;
+  if (!ReadBlob(bytes, offset, secret_bytes) ||
+      !ReadBlob(bytes, offset, keyring.public_key_bytes_) ||
+      !ReadBlob(bytes, offset, keyring.relin_keys_bytes_) ||
+      !ReadBlob(bytes, offset, keyring.galois_keys_bytes_))
+    return absl::InvalidArgumentError("keyset blob is truncated or malformed");
+  keyring.has_galois_ = has_galois;
+
+  // Bind every key to the context, validating each against its parameters. A
+  // mismatched or corrupted blob is rejected with a status, never a crash.
+  absl::StatusOr<seal::SecretKey> sk =
+      LoadFromString<seal::SecretKey>(ctx.seal(), secret_bytes, "secret key");
+  if (!sk.ok())
+    return sk.status();
+  keyring.secret_key_ = *std::move(sk);
+
+  absl::StatusOr<seal::PublicKey> pk = LoadFromString<seal::PublicKey>(
+      ctx.seal(), keyring.public_key_bytes_, "public key");
+  if (!pk.ok())
+    return pk.status();
+  keyring.public_key_ = *std::move(pk);
+
+  absl::StatusOr<seal::RelinKeys> rk = LoadFromString<seal::RelinKeys>(
+      ctx.seal(), keyring.relin_keys_bytes_, "relinearization keys");
+  if (!rk.ok())
+    return rk.status();
+  keyring.relin_keys_ = *std::move(rk);
+
+  if (has_galois) {
+    absl::StatusOr<seal::GaloisKeys> gk = LoadFromString<seal::GaloisKeys>(
+        ctx.seal(), keyring.galois_keys_bytes_, "Galois keys");
+    if (!gk.ok())
+      return gk.status();
+    keyring.galois_keys_ = *std::move(gk);
+  }
+  return keyring;
 }
 
 absl::StatusOr<EvalKeys> LoadKeyMaterial(const CryptoContext &ctx,

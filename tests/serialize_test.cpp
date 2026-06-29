@@ -148,4 +148,61 @@ TEST(DeserializeCiphertexts, RejectsCiphertextBuiltForDifferentParameters) {
   EXPECT_FALSE(got.ok()) << "foreign-parameter ciphertext must be rejected";
 }
 
+// SerializeAll/LoadAll is the client-side keyset persistence that lets a client
+// reuse its identity and register only once. The blob carries the secret key,
+// so it never crosses the wire, but it must round-trip exactly.
+
+TEST(SerializeAll, RoundTripsTheFullKeysetIncludingSecret) {
+  CryptoContext ctx = MakeContext();
+  // A small Galois step set exercises the has_galois path without the cost of
+  // the full power-of-two set.
+  ClientKeyring keyring = ClientKeyring::Generate(ctx, std::vector<int>{1});
+
+  auto blob = keyring.SerializeAll();
+  ASSERT_TRUE(blob.ok()) << blob.status().message();
+
+  auto loaded = ClientKeyring::LoadAll(ctx, *blob);
+  ASSERT_TRUE(loaded.ok()) << loaded.status().message();
+
+  // Re-serializing the reconstructed keyset yields identical bytes: every key,
+  // secret included, survived the round trip.
+  auto reblob = loaded->SerializeAll();
+  ASSERT_TRUE(reblob.ok());
+  EXPECT_EQ(*reblob, *blob);
+
+  // The public wire form also matches.
+  auto orig_pub = keyring.SerializePublic();
+  auto load_pub = loaded->SerializePublic();
+  ASSERT_TRUE(orig_pub.ok());
+  ASSERT_TRUE(load_pub.ok());
+  EXPECT_EQ(orig_pub->public_key, load_pub->public_key);
+  EXPECT_EQ(orig_pub->relin_keys, load_pub->relin_keys);
+  EXPECT_EQ(orig_pub->galois_keys, load_pub->galois_keys);
+}
+
+TEST(SerializeAll, RoundTripsWithoutGalois) {
+  CryptoContext ctx = MakeContext();
+  ClientKeyring keyring = ClientKeyring::Generate(ctx, /*with_galois=*/false);
+  auto blob = keyring.SerializeAll();
+  ASSERT_TRUE(blob.ok());
+  auto loaded = ClientKeyring::LoadAll(ctx, *blob);
+  ASSERT_TRUE(loaded.ok()) << loaded.status().message();
+  auto pub = loaded->SerializePublic();
+  ASSERT_TRUE(pub.ok());
+  EXPECT_TRUE(pub->galois_keys.empty());
+}
+
+TEST(SerializeAll, RejectsGarbageAndForeignParameters) {
+  CryptoContext ctx = MakeContext();
+  EXPECT_FALSE(ClientKeyring::LoadAll(ctx, "").ok());
+  EXPECT_FALSE(ClientKeyring::LoadAll(ctx, "not a keyset blob").ok());
+
+  // A blob from one parameter set must not load under another.
+  CryptoContext foreign = MakeContext(/*plain_modulus_bits=*/22);
+  ClientKeyring fk = ClientKeyring::Generate(foreign, /*with_galois=*/false);
+  auto fblob = fk.SerializeAll();
+  ASSERT_TRUE(fblob.ok());
+  EXPECT_FALSE(ClientKeyring::LoadAll(ctx, *fblob).ok());
+}
+
 } // namespace

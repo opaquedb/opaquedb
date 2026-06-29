@@ -375,14 +375,16 @@ single-match callers.
 limit), `plain_modulus_bits=20`, `key_bits=16`. poly 16384 is REQUIRED: the
 depth-5 pipeline exhausts the budget at 8192 (the 349-bit modulus leaves a
 measured ~52-bit budget). Raising key_bits deepens the AND tree and needs more
-primes. KNOWN BUG (tracked, `matcher_bug_repro_test`
-`DISABLED_DefaultModulusIsTooShallowForKeyBits64`): config validates that
-key_bits is a power of two <= 64 and fits the slot geometry, but NOT that the
-modulus chain is deep enough for the matcher (depth 1 + log2(key_bits)).
-key_bits 32 (depth 6) still decrypts on the default modulus; key_bits 64 (depth
-7) exhausts it and decrypts to garbage with a 0 noise budget and no error. The
-fix is a configure-time guard or a startup self-test that probes the budget;
-until then do not raise key_bits past 32 without widening coeff_modulus_bits.
+primes. The matcher's multiplicative depth is `1 + log2(key_bits)`, one prime
+per level, so the modulus chain must list at least that many primes. Config
+`Validate` now enforces this (`crypto.key_bits` whose depth exceeds
+`coeff_modulus_bits.size()` is rejected at load time): key_bits 32 (depth 6)
+passes on the default 6-prime chain, key_bits 64 (depth 7) is refused unless you
+widen `coeff_modulus_bits` to >= 7 primes. This closes the former silent-garbage
+bug (key_bits 64 used to be accepted and decrypt to garbage with a 0 noise
+budget and no error; the crypto repro stays tracked as
+`matcher_bug_repro_test.DISABLED_DefaultModulusIsTooShallowForKeyBits64`,
+documenting the underlying behavior the guard now prevents reaching).
 Tune against `examples/crypto_bench`; the reference backend test asserts
 a positive noise budget. Galois keys are generated but only the steps the matcher
 uses (`core::RequiredGaloisSteps`: +/- power-of-two AND/broadcast plus block-sum,
@@ -393,9 +395,20 @@ full set for benches). The reduced Galois set is ~125 MB at poly 16384 (relin
 `RegisterKeys` RPC. Keys are generated and serialized in SEAL's seeded
 `Serializable<T>` form (the second polynomial becomes a 32-byte seed), which
 roughly halves these sizes on the wire; the local accessors load the seeded
-bytes back. Key distribution is the coordinator's job; the production path is a
-shared object store (`BlobStoreConfig`, MinIO/S3) — see the TODO in
-`query_service.cpp`.
+bytes back. Key distribution is the coordinator's job: `Register` stores the
+keys locally and forwards them to every peer. Each node persists its keys with
+`admin::FileKeyringStore`: one file per client id under `Config::KeyringDir()`
+(`keyring.path`, default `<data_dir>/keys`), atomic temp-then-rename, mode
+0600; re-register overwrites, so one client id maps to exactly one keyset. The
+store is read-through cached, so a restart reloads keys from disk and a client
+need not re-register. A client can also persist its OWN keyset (secret key included) with
+`crypto::ClientKeyring::SerializeAll` / `QueryClient::SerializeKeyset` and rebuild
+via `QueryClient::CreateWithKeyset` to reuse its identity across runs without a
+second `Register`; that blob is the secret and never crosses the wire (the wire
+form, `SerializePublic`, still omits the secret key). The client_id is a
+client-supplied string (an application is the trusted client and may own many
+client_ids, one per end-user context); the server binds it to the registering
+auth principal.
 
 **Storage.** Per table:
 `<data_dir>/db/<database>/<table>/epochs/<version>/{match.seg,payload.seg,manifest.json}`
