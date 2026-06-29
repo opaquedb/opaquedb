@@ -265,11 +265,13 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
         std::vector<std::uint64_t> key_slots(N, 0);
         std::vector<std::uint64_t> start_mask(N, 0);
         for (const std::pair<std::size_t, std::size_t> &item : items) {
-          const std::vector<std::uint64_t> bits =
-              core::KeyToBits(keys.keys[item.first], kb);
+          // Bit-expand the key straight into its slots. This is core::KeyToBits
+          // inlined to skip the per-row vector it would allocate; the loop runs
+          // once per row, so a fresh heap allocation here is pure overhead.
+          const std::uint64_t value = keys.keys[item.first];
           const std::size_t at = item.second;
           for (std::uint32_t b = 0; b < kb; ++b)
-            key_slots[at + b] = bits[b];
+            key_slots[at + b] = (value >> b) & 1ull;
           start_mask[at] = 1;
         }
         absl::StatusOr<seal::Plaintext> key_pt = ctx_.EncodeBatch(key_slots);
@@ -335,9 +337,13 @@ ReferenceBackend::evaluate(EvalContext &ctx, const EncryptedQuery &query,
           ev.add_inplace(sel, rot);
         }
 
+        // One scratch slot buffer reused across planes: it is the same size
+        // every iteration, so allocate once and clear it per plane instead of
+        // reallocating N (poly/2) slots for each plane of each batch.
+        std::vector<std::uint64_t> pay_slots(N, 0);
         for (std::uint32_t p = 0; p < planes; ++p) {
           // Pack plane p of each row's payload into its assigned block.
-          std::vector<std::uint64_t> pay_slots(N, 0);
+          std::fill(pay_slots.begin(), pay_slots.end(), 0);
           const std::uint32_t lo = p * bytes_per_block;
           const std::uint32_t hi =
               std::min(record_bytes, (p + 1) * bytes_per_block);
@@ -488,11 +494,14 @@ ReferenceBackend::combine(EvalContext &ctx,
     for (std::size_t i = 0; i < width; ++i) {
       bool have = false;
       seal::Ciphertext acc;
-      for (const auto &shard : partials) {
+      // partials is owned by value (the engine moves it in), so move the first
+      // shard's ciphertext into the accumulator instead of copying it; the rest
+      // add in place.
+      for (auto &shard : partials) {
         if (i >= shard.size())
           continue;
         if (!have) {
-          acc = shard[i];
+          acc = std::move(shard[i]);
           have = true;
         } else {
           evaluator_->add_inplace(acc, shard[i]);

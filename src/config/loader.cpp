@@ -420,6 +420,29 @@ absl::Status Validate(const Config &config) {
                      ") must not exceed poly_modulus_degree/2 (",
                      c.poly_modulus_degree / 2, ")"));
   }
+  // The matcher's multiplicative depth is 1 (the equality square) plus one
+  // ct*ct multiply per level of the AND tree, log2(key_bits) levels. Each
+  // multiply consumes one prime from the modulus chain, so the chain must list
+  // at least that many primes or the result decrypts to garbage with a zero
+  // noise budget and NO error. Config used to check only that key_bits is a
+  // power of two that fits the slot geometry, which let key_bits = 64 (depth 7)
+  // through on the default 6-prime chain and silently corrupt every query.
+  // Reject that here. (Calibrated against the default [60]*5+[49] chain, where
+  // depth 6 / key_bits 32 still decrypts but depth 7 / key_bits 64 does not.)
+  std::uint32_t key_bits_log2 = 0;
+  for (std::uint32_t k = c.key_bits; k > 1; k >>= 1)
+    ++key_bits_log2;
+  if (const std::size_t matcher_depth = 1 + key_bits_log2;
+      matcher_depth > c.coeff_modulus_bits.size()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "crypto.key_bits (", c.key_bits, ") needs a matcher depth of ",
+        matcher_depth,
+        " (1 + log2(key_bits)), but crypto.coeff_modulus_bits "
+        "lists only ",
+        c.coeff_modulus_bits.size(),
+        " primes; add primes or lower key_bits so the modulus chain is deep "
+        "enough"));
+  }
   if (c.result_buckets == 0 || !IsPowerOfTwo(c.result_buckets)) {
     return absl::InvalidArgumentError(absl::StrCat(
         "crypto.result_buckets must be a positive power of two, got ",

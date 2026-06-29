@@ -177,7 +177,11 @@ QueryService::Register(grpc::ServerContext *context,
       ch.set_wire_version(core::kWireVersion);
       ch.set_client_id(client_id);
       ch.set_kind(kind);
-      ch.set_data(data.substr(off, kChunkBytes));
+      // set_data over (ptr, len) copies the chunk straight into the message;
+      // substr would first build a throwaway std::string per chunk of a blob
+      // that runs to ~125 MB.
+      const std::size_t len = std::min(kChunkBytes, data.size() - off);
+      ch.set_data(data.data() + off, len);
       if (!w->Write(ch))
         return false;
     }
