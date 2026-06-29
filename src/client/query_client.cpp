@@ -85,6 +85,16 @@ absl::Status FromGrpc(const grpc::Status &s) {
                       s.error_message());
 }
 
+absl::StatusOr<std::unique_ptr<opaquedb::proto::OpaqueDB::Stub>>
+MakeStub(const config::Config &cfg, const std::string &target) {
+  absl::StatusOr<std::shared_ptr<grpc::ChannelCredentials>> creds =
+      MakeClientCredentials(cfg.client);
+  if (!creds.ok())
+    return creds.status();
+  auto channel = grpc::CreateCustomChannel(target, *creds, ChannelArgs(cfg));
+  return proto::OpaqueDB::NewStub(channel);
+}
+
 } // namespace
 
 absl::StatusOr<std::unique_ptr<QueryClient>>
@@ -100,15 +110,38 @@ QueryClient::Create(const config::Config &cfg, const std::string &target,
       *c, core::RequiredGaloisSteps(static_cast<std::uint32_t>(c->slot_count()),
                                     cfg.crypto.key_bits));
 
-  absl::StatusOr<std::shared_ptr<grpc::ChannelCredentials>> creds =
-      MakeClientCredentials(cfg.client);
-  if (!creds.ok())
-    return creds.status();
-  auto channel = grpc::CreateCustomChannel(target, *creds, ChannelArgs(cfg));
-  auto stub = proto::OpaqueDB::NewStub(channel);
+  absl::StatusOr<std::unique_ptr<proto::OpaqueDB::Stub>> stub =
+      MakeStub(cfg, target);
+  if (!stub.ok())
+    return stub.status();
 
   return std::unique_ptr<QueryClient>(new QueryClient(
-      cfg, *std::move(c), std::move(kr), std::move(stub), bearer_token));
+      cfg, *std::move(c), std::move(kr), *std::move(stub), bearer_token));
+}
+
+absl::StatusOr<std::unique_ptr<QueryClient>> QueryClient::CreateWithKeyset(
+    const config::Config &cfg, const std::string &target,
+    std::string_view keyset, const std::string &bearer_token) {
+  absl::StatusOr<crypto::CryptoContext> c =
+      crypto::CryptoContext::Create(cfg.crypto);
+  if (!c.ok())
+    return c.status();
+  absl::StatusOr<crypto::ClientKeyring> kr =
+      crypto::ClientKeyring::LoadAll(*c, keyset);
+  if (!kr.ok())
+    return kr.status();
+
+  absl::StatusOr<std::unique_ptr<proto::OpaqueDB::Stub>> stub =
+      MakeStub(cfg, target);
+  if (!stub.ok())
+    return stub.status();
+
+  return std::unique_ptr<QueryClient>(new QueryClient(
+      cfg, *std::move(c), *std::move(kr), *std::move(stub), bearer_token));
+}
+
+absl::StatusOr<std::string> QueryClient::SerializeKeyset() const {
+  return keyring_.SerializeAll();
 }
 
 QueryClient::QueryClient(config::Config cfg, crypto::CryptoContext ctx,
@@ -138,9 +171,9 @@ absl::Status QueryClient::Register(const std::string &client_id) {
 
   // Galois keys are large (hundreds of MB at poly 16384), so split each key
   // into chunks well under the gRPC message limit. The server concatenates
-  // chunks of the same kind in arrival order. This is what the streaming
-  // Register RPC is for; a BlobStore-backed keyring is the documented
-  // production path for caching and distributing keys without re-sending them.
+  // chunks of the same kind in arrival order and persists them, so a client
+  // registers once and can reuse the same keyset later (see CreateWithKeyset)
+  // instead of re-uploading on every run.
   constexpr std::size_t kChunkBytes = 4u * 1024 * 1024;
   auto send = [&](opaquedb::proto::KeyKind k, const std::string &d) -> bool {
     for (std::size_t off = 0; off < d.size(); off += kChunkBytes) {

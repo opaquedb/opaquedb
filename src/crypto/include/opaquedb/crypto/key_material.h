@@ -2,6 +2,7 @@
 #define OPAQUEDB_CRYPTO_KEY_MATERIAL_H_
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/status/statusor.h"
@@ -53,6 +54,22 @@ public:
   // Serializes the public and evaluation keys for transport. The secret key is
   // deliberately not serializable through this path.
   absl::StatusOr<KeyMaterial> SerializePublic() const;
+
+  // Serializes the ENTIRE keyset, including the secret key, for the client to
+  // persist locally and reuse across runs. This is what lets a client register
+  // its public and evaluation keys with the server once and then reuse the same
+  // identity on later runs instead of generating a fresh keyset every time.
+  //
+  // This blob is the secret. It must never be sent to the server and must be
+  // stored with owner-only permissions. It is the opposite of SerializePublic,
+  // which is the wire form and omits the secret key on purpose.
+  absl::StatusOr<std::string> SerializeAll() const;
+
+  // Reconstructs a keyset previously produced by SerializeAll, binding it to
+  // the context. The context must use the same parameters the keyset was
+  // generated under, or loading is rejected with a status.
+  static absl::StatusOr<ClientKeyring> LoadAll(const CryptoContext &ctx,
+                                               std::string_view bytes);
 
 private:
   ClientKeyring() = default;

@@ -393,9 +393,21 @@ full set for benches). The reduced Galois set is ~125 MB at poly 16384 (relin
 `RegisterKeys` RPC. Keys are generated and serialized in SEAL's seeded
 `Serializable<T>` form (the second polynomial becomes a 32-byte seed), which
 roughly halves these sizes on the wire; the local accessors load the seeded
-bytes back. Key distribution is the coordinator's job; the production path is a
-shared object store (`BlobStoreConfig`, MinIO/S3) — see the TODO in
-`query_service.cpp`.
+bytes back. Key distribution is the coordinator's job: `Register` stores the
+keys locally and forwards them to every peer. Each node persists its keys with
+`admin::FileKeyringStore` (the keyring backend chosen by `BlobStoreConfig`;
+`kLocal` writes one file per client id under `Config::KeyringDir()`, default
+`<data_dir>/keys`, atomic temp-then-rename, mode 0600; re-register overwrites, so
+one client id maps to exactly one keyset; `kS3` is not implemented). The store is
+read-through cached, so a restart reloads keys from disk and a client need not
+re-register. A client can also persist its OWN keyset (secret key included) with
+`crypto::ClientKeyring::SerializeAll` / `QueryClient::SerializeKeyset` and rebuild
+via `QueryClient::CreateWithKeyset` to reuse its identity across runs without a
+second `Register`; that blob is the secret and never crosses the wire (the wire
+form, `SerializePublic`, still omits the secret key). The client_id is a
+client-supplied string (an application is the trusted client and may own many
+client_ids, one per end-user context); the server binds it to the registering
+auth principal.
 
 **Storage.** Per table:
 `<data_dir>/db/<database>/<table>/epochs/<version>/{match.seg,payload.seg,manifest.json}`

@@ -22,6 +22,13 @@ std::string Config::DatabasesDir() const {
   return base + "/db";
 }
 
+std::string Config::KeyringDir() const {
+  if (!blobstore.path.empty()) {
+    return blobstore.path;
+  }
+  return node.data_dir + "/keys";
+}
+
 std::string ToString(AuthMode mode) {
   switch (mode) {
   case AuthMode::kToken:

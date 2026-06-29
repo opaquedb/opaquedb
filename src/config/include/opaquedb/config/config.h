@@ -184,7 +184,9 @@ struct AuthConfig {
 
 struct BlobStoreConfig {
   BlobStoreKind kind = BlobStoreKind::kLocal;
-  std::string path = "/var/lib/opaquedb/keys";
+  // Where the persistent keyring lives. Empty means data_dir/keys, so the keys
+  // sit beside the epochs on the same volume by default (see KeyringDir).
+  std::string path;
 };
 
 struct MetricsConfig {
@@ -226,6 +228,10 @@ struct Config {
   // The directory that holds the per-database subtrees, <base>/db. The catalog
   // scans this to enumerate databases and tables.
   std::string DatabasesDir() const;
+
+  // The persistent keyring directory, resolving the empty default to
+  // data_dir/keys so the keys live on the same volume as the epochs.
+  std::string KeyringDir() const;
 };
 
 // String conversions for the enums, used by parsing, printing, and error

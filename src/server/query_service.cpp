@@ -165,11 +165,10 @@ QueryService::Register(grpc::ServerContext *context,
   //
   // Keys are chunked over the streaming RegisterKeys RPC because the Galois set
   // is large (~110 MB at poly 16384, even reduced to the steps the matcher
-  // uses). TODO(blobstore): the production path is a shared object store
-  // (MinIO / S3, see BlobStoreConfig) that the coordinator writes the keys to
-  // once, keyed by client id; shards read them by reference instead of having
-  // the ~110 MB re-streamed to every shard on every registration.
-  // A shard that already has the keys just overwrites them.
+  // uses). Each node persists its received keys (FileKeyringStore), so a node
+  // restart needs no re-register; only a client that has never registered on
+  // this cluster pays the one-time upload. A shard that already has the keys
+  // just overwrites them, keeping the one-client-id-to-one-keyset rule.
   constexpr std::size_t kChunkBytes = 4u * 1024 * 1024;
   auto forward_key = [&](grpc::ClientWriter<proto::KeyUploadChunk> *w,
                          proto::KeyKind kind, const std::string &data) -> bool {
