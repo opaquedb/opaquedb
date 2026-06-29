@@ -15,8 +15,8 @@
 // credential to a client id, and this store maps a client id to its keys. The
 // secret key is never here.
 //
-// An interface so a real deployment can back it with the BlobStore (large key
-// blobs) and etcd (metadata), while tests and the single-node path use memory.
+// An interface: the node persists keys with FileKeyringStore (one file per
+// client id, surviving restarts), while tests use the in-memory store.
 
 namespace opaquedb::admin {
 

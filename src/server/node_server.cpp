@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "absl/strings/str_cat.h"
+#include "opaquedb/admin/file_keyring_store.h"
 #include "opaquedb/auth/authenticators.h"
 #include "opaquedb/backend/reference/reference.h"
 #include "opaquedb/cluster/real_etcd_client.h"
@@ -184,7 +185,16 @@ absl::Status NodeServer::Start() {
     return repo.status();
   repo_ = *std::move(repo);
 
-  keyring_ = std::make_unique<admin::InMemoryKeyringStore>();
+  // The keyring persists each client's public and evaluation keys so a client
+  // registers once and the keys survive a node restart, instead of being held
+  // only in memory.
+  const std::string keyring_dir = config_.KeyringDir();
+  absl::StatusOr<std::unique_ptr<admin::FileKeyringStore>> store =
+      admin::FileKeyringStore::Open(keyring_dir);
+  if (!store.ok())
+    return store.status();
+  keyring_ = *std::move(store);
+  spdlog::info("keyring persisted to {}", keyring_dir);
 
   // The engine routes each query to the repository that holds its table, across
   // many databases and tables. The manager opens per-table repositories on

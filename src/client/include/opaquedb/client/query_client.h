@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -35,8 +36,25 @@ public:
   Create(const config::Config &cfg, const std::string &target,
          const std::string &bearer_token = "");
 
+  // Create a client that reuses a keyset previously produced by SerializeKeyset
+  // instead of generating a fresh one. This is how a real client registers its
+  // keys once and then reuses the same identity (and the keys already held by
+  // the server) on later runs without re-registering the large Galois set.
+  // keyset is the secret blob from SerializeKeyset and must come from a trusted
+  // local store.
+  static absl::StatusOr<std::unique_ptr<QueryClient>>
+  CreateWithKeyset(const config::Config &cfg, const std::string &target,
+                   std::string_view keyset,
+                   const std::string &bearer_token = "");
+
   // Upload this client's public/eval keys.
   absl::Status Register(const std::string &client_id);
+
+  // Serialize this client's full keyset (including the secret key) so it can be
+  // persisted locally and reused via CreateWithKeyset. The returned bytes are
+  // the secret: store them with owner-only permissions and never send them to
+  // the server.
+  absl::StatusOr<std::string> SerializeKeyset() const;
 
   // Fetch a table's schema from the node, to decode rows and project the SELECT
   // columns. database empty means "default".

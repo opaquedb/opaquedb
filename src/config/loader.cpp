@@ -88,15 +88,6 @@ absl::StatusOr<AuthMode> ParseAuthMode(std::string_view value) {
       absl::StrCat("auth.mode: expected token|mtls|none, got '", value, "'"));
 }
 
-absl::StatusOr<BlobStoreKind> ParseBlobKind(std::string_view value) {
-  if (value == "local")
-    return BlobStoreKind::kLocal;
-  if (value == "s3")
-    return BlobStoreKind::kS3;
-  return absl::InvalidArgumentError(
-      absl::StrCat("blobstore.kind: expected local|s3, got '", value, "'"));
-}
-
 absl::StatusOr<LogFormat> ParseLogFormat(std::string_view value) {
   if (value == "json")
     return LogFormat::kJson;
@@ -172,8 +163,7 @@ constexpr std::string_view kKeys[] = {
     "auth.token_file",
     "auth.ca_cert",
     "auth.admin_identities",
-    "blobstore.kind",
-    "blobstore.path",
+    "keyring.path",
     "metrics.listen",
     "logging.level",
     "logging.format",
@@ -367,13 +357,8 @@ absl::Status ApplyKeyValue(Config &config, std::string_view key,
     config.auth.ca_cert = std::string(value);
   } else if (key == "auth.admin_identities") {
     config.auth.admin_identities = ParseStringList(value);
-  } else if (key == "blobstore.kind") {
-    auto v = ParseBlobKind(value);
-    if (!v.ok())
-      return v.status();
-    config.blobstore.kind = *v;
-  } else if (key == "blobstore.path") {
-    config.blobstore.path = std::string(value);
+  } else if (key == "keyring.path") {
+    config.keyring.path = std::string(value);
   } else if (key == "metrics.listen") {
     config.metrics.listen = std::string(value);
   } else if (key == "logging.level") {
@@ -646,9 +631,7 @@ std::string ToToml(const Config &config) {
                           {"token_file", config.auth.token_file},
                           {"ca_cert", config.auth.ca_cert},
                           {"admin_identities", std::move(admin_identities)}});
-  root.insert("blobstore",
-              toml::table{{"kind", ToString(config.blobstore.kind)},
-                          {"path", config.blobstore.path}});
+  root.insert("keyring", toml::table{{"path", config.keyring.path}});
   root.insert("metrics", toml::table{{"listen", config.metrics.listen}});
   root.insert("logging",
               toml::table{{"level", config.logging.level},

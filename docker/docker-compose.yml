@@ -11,6 +11,9 @@
 #     --target node1:50051
 #
 # Any of node1/node2/node3 can be the --target; each coordinates equally.
+#
+# Each node persists its registered client keys under <data_dir>/keys on its
+# volume, so a client registers once and the keys survive a node restart.
 
 name: opaquedb
 
