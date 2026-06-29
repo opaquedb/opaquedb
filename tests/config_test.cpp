@@ -69,7 +69,7 @@ TEST_F(ConfigTest, FileOverridesDefaults) {
   std::string path = WriteTemp(R"([server]
 listen = "0.0.0.0:6000"
 [crypto]
-coeff_modulus_bits = [60, 40, 60]
+coeff_modulus_bits = [60, 40, 40, 40, 60]
 )");
   LoadOptions opts;
   opts.config_path = path;
@@ -77,7 +77,8 @@ coeff_modulus_bits = [60, 40, 60]
   auto cfg = Load(opts);
   ASSERT_TRUE(cfg.ok()) << cfg.status().message();
   EXPECT_EQ(cfg->server.listen, "0.0.0.0:6000");
-  EXPECT_EQ(cfg->crypto.coeff_modulus_bits, (std::vector<int>{60, 40, 60}));
+  EXPECT_EQ(cfg->crypto.coeff_modulus_bits,
+            (std::vector<int>{60, 40, 40, 40, 60}));
 }
 
 TEST_F(ConfigTest, EnvOverridesFile) {
@@ -119,12 +120,13 @@ TEST_F(ConfigTest, EnvParsesListsAsCsv) {
   LoadOptions opts;
   opts.env = FakeEnv(
       {{"OPAQUEDB_CLUSTER_ETCD_ENDPOINTS", "http://a:2379,http://b:2379"},
-       {"OPAQUEDB_CRYPTO_COEFF_MODULUS_BITS", "60, 40, 40, 60"}});
+       {"OPAQUEDB_CRYPTO_COEFF_MODULUS_BITS", "60, 40, 40, 40, 60"}});
   auto cfg = Load(opts);
   ASSERT_TRUE(cfg.ok()) << cfg.status().message();
   EXPECT_EQ(cfg->cluster.etcd_endpoints,
             (std::vector<std::string>{"http://a:2379", "http://b:2379"}));
-  EXPECT_EQ(cfg->crypto.coeff_modulus_bits, (std::vector<int>{60, 40, 40, 60}));
+  EXPECT_EQ(cfg->crypto.coeff_modulus_bits,
+            (std::vector<int>{60, 40, 40, 40, 60}));
 }
 
 TEST_F(ConfigTest, RejectsNonPowerOfTwoPolyDegree) {
@@ -282,8 +284,9 @@ TEST_F(ConfigTest, MissingFileIsErrorUnlessOptional) {
 
 TEST_F(ConfigTest, ToTomlRoundTrips) {
   LoadOptions opts;
-  opts.env = FakeEnv({{"OPAQUEDB_SERVER_LISTEN", "0.0.0.0:5555"},
-                      {"OPAQUEDB_CRYPTO_COEFF_MODULUS_BITS", "60,40,60"}});
+  opts.env =
+      FakeEnv({{"OPAQUEDB_SERVER_LISTEN", "0.0.0.0:5555"},
+               {"OPAQUEDB_CRYPTO_COEFF_MODULUS_BITS", "60,40,40,40,60"}});
   auto cfg = Load(opts);
   ASSERT_TRUE(cfg.ok()) << cfg.status().message();
 
@@ -292,7 +295,7 @@ TEST_F(ConfigTest, ToTomlRoundTrips) {
   ASSERT_TRUE(reloaded.ok()) << reloaded.status().message();
   EXPECT_EQ(reloaded->server.listen, "0.0.0.0:5555");
   EXPECT_EQ(reloaded->crypto.coeff_modulus_bits,
-            (std::vector<int>{60, 40, 60}));
+            (std::vector<int>{60, 40, 40, 40, 60}));
 }
 
 TEST_F(ConfigTest, ResolveConfigPathPrecedence) {
