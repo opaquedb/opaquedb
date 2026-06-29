@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "opaquedb",
-  "version": "0.4.0",
-  "description": "Distributed PIR database engine answering SQL-like queries over homomorphically encrypted data.",
+  "version": "0.5.0",
+  "description": "Post-quantum distributed private database.",
   "license": "Apache-2.0",
   "builtin-baseline": "930ecc42b512b564571d767f70775d284a6fa307",
   "dependencies": [
